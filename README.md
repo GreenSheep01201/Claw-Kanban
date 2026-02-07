@@ -2,7 +2,7 @@
   <img src="public/kanban-claw.svg" width="80" alt="Claw Kanban" />
 </p>
 
-<h1 align="center">Claw Kanban</h1>
+<h1 align="center">Claw-Kanban</h1>
 
 <p align="center">
   <strong>AI Agent Orchestration Kanban Board</strong><br>
@@ -10,12 +10,111 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick Start</a> &middot;
+  <a href="#install-with-ai">Install with AI</a> &middot;
   <a href="#features">Features</a> &middot;
   <a href="#architecture">Architecture</a> &middot;
   <a href="#api-reference">API</a> &middot;
   <a href="README.ko.md">한국어</a>
 </p>
+
+---
+
+## Install with AI
+
+> **Just paste this to your AI coding agent (Claude Code, Codex, Gemini CLI, Cursor, etc.):**
+>
+> ```
+> Install Claw-Kanban following the guide at:
+> https://github.com/GreenSheep01201/Claw-Kanban
+> ```
+>
+> The AI will read this README and handle everything automatically.
+
+---
+
+## AI Installation Guide
+
+> **This section is written for AI coding agents.**
+> If you are an AI assistant and the user has asked you to install Claw-Kanban, follow the steps below exactly. Each step includes a verification command — run it and confirm success before proceeding to the next step.
+
+### Step 0: Check Prerequisites
+
+```bash
+# 1. Check Node.js version (must be 22 or higher)
+node -v
+# Expected: v22.x.x or higher. If missing or below v22, stop and tell the user:
+#   "Node.js 22+ is required. Install from https://nodejs.org/ or use nvm: nvm install 22"
+
+# 2. Check for pnpm (recommended) or npm
+pnpm -v || npm -v
+# If pnpm is missing, install it:
+#   npm install -g pnpm
+
+# 3. Check for at least one AI CLI tool
+which claude || which codex || which gemini
+# If none found, tell the user to install at least one:
+#   Claude Code: npm i -g @anthropic-ai/claude-code && claude login
+#   Codex CLI:   npm i -g @openai/codex && codex auth login
+#   Gemini CLI:  npm i -g @google/gemini-cli && gemini auth login
+```
+
+### Step 1: Clone and Build
+
+```bash
+git clone https://github.com/GreenSheep01201/Claw-Kanban.git
+cd Claw-Kanban
+pnpm install    # or: npm install
+pnpm build      # or: npm run build
+```
+
+**Verify:** `ls dist/index.html` should exist.
+
+### Step 2: Start the Server
+
+```bash
+pnpm start
+# Server starts at http://127.0.0.1:8787
+```
+
+**Verify:** `curl -s http://127.0.0.1:8787/api/health` should return `{"ok":true, ...}`.
+
+### Step 3: Open the Dashboard
+
+Tell the user:
+
+```
+Claw-Kanban is installed and running!
+Dashboard: http://127.0.0.1:8787
+```
+
+### Optional: AGENTS.md Setup
+
+If the user wants AI agents to auto-register kanban tasks from chat messages:
+
+```bash
+pnpm setup
+# This prepends orchestration rules to the workspace AGENTS.md
+```
+
+### Optional: Development Mode
+
+For development with hot reload:
+
+```bash
+pnpm dev        # LAN accessible (0.0.0.0)
+pnpm dev:local  # localhost only (127.0.0.1)
+# UI: http://127.0.0.1:5173  |  API: http://127.0.0.1:8787
+```
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `pnpm build` fails with "node:sqlite" error | Node.js < 22 | Upgrade to Node.js 22+: `nvm install 22 && nvm use 22` |
+| Port 8787 already in use | Another process on port | `lsof -i :8787` to find it, or set `PORT=9999 pnpm start` |
+| `curl /api/health` connection refused | Server not running | Run `pnpm start` from the Claw-Kanban directory |
+| No AI providers shown in Settings | CLI tools not installed | Install at least one: `npm i -g @anthropic-ai/claude-code` |
+| Provider shows "Not Authenticated" | CLI tool not logged in | Run the auth command: `claude login`, `codex auth login`, or `gemini auth login` |
 
 ---
 
@@ -43,7 +142,7 @@
 |------|---------|-------------|
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm i -g @anthropic-ai/claude-code` | `claude login` |
 | [OpenAI Codex CLI](https://github.com/openai/codex) | `npm i -g @openai/codex` | `codex auth login` |
-| [Google Gemini CLI](https://github.com/google-gemini/gemini-cli) | `npm i -g @anthropic-ai/gemini-cli` | `gemini auth login` |
+| [Google Gemini CLI](https://github.com/google-gemini/gemini-cli) | `npm i -g @google/gemini-cli` | `gemini auth login` |
 
 ## Quick Start
 
@@ -274,7 +373,7 @@ Content-Type: application/json
 ### Health
 
 ```bash
-GET /api/health    # { ok, dbPath, gateway }
+GET /api/health    # { ok, version, dbPath, gateway }
 ```
 
 ## CLI Detection

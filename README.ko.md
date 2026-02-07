@@ -2,7 +2,7 @@
   <img src="public/kanban-claw.svg" width="80" alt="Claw Kanban" />
 </p>
 
-<h1 align="center">Claw Kanban</h1>
+<h1 align="center">Claw-Kanban</h1>
 
 <p align="center">
   <strong>AI 에이전트 오케스트레이션 칸반 보드</strong><br>
@@ -10,12 +10,111 @@
 </p>
 
 <p align="center">
-  <a href="#빠른-시작">빠른 시작</a> &middot;
+  <a href="#ai로-설치하기">AI로 설치하기</a> &middot;
   <a href="#주요-기능">주요 기능</a> &middot;
   <a href="#아키텍처">아키텍처</a> &middot;
   <a href="#api-레퍼런스">API</a> &middot;
   <a href="README.md">English</a>
 </p>
+
+---
+
+## AI로 설치하기
+
+> **AI 코딩 에이전트 (Claude Code, Codex, Gemini CLI, Cursor 등)에 아래 문구를 붙여넣기만 하세요:**
+>
+> ```
+> Claw-Kanban을 설치해줘. 가이드는 여기 참고:
+> https://github.com/GreenSheep01201/Claw-Kanban
+> ```
+>
+> AI가 이 README를 읽고 모든 과정을 자동으로 처리합니다.
+
+---
+
+## AI 설치 가이드
+
+> **이 섹션은 AI 코딩 에이전트를 위해 작성되었습니다.**
+> AI 어시스턴트로서 사용자가 Claw-Kanban 설치를 요청했다면, 아래 단계를 정확히 따르세요. 각 단계마다 검증 명령어가 포함되어 있으니, 실행 후 성공을 확인한 뒤 다음 단계로 진행하세요.
+
+### Step 0: 사전 요구 사항 확인
+
+```bash
+# 1. Node.js 버전 확인 (22 이상 필수)
+node -v
+# 기대값: v22.x.x 이상. 없거나 v22 미만이면 중단하고 사용자에게 안내:
+#   "Node.js 22+가 필요합니다. https://nodejs.org/ 에서 설치하거나 nvm을 사용하세요: nvm install 22"
+
+# 2. pnpm (권장) 또는 npm 확인
+pnpm -v || npm -v
+# pnpm이 없으면 설치:
+#   npm install -g pnpm
+
+# 3. AI CLI 도구가 하나 이상 있는지 확인
+which claude || which codex || which gemini
+# 하나도 없으면 사용자에게 설치 안내:
+#   Claude Code: npm i -g @anthropic-ai/claude-code && claude login
+#   Codex CLI:   npm i -g @openai/codex && codex auth login
+#   Gemini CLI:  npm i -g @google/gemini-cli && gemini auth login
+```
+
+### Step 1: 클론 및 빌드
+
+```bash
+git clone https://github.com/GreenSheep01201/Claw-Kanban.git
+cd Claw-Kanban
+pnpm install    # 또는: npm install
+pnpm build      # 또는: npm run build
+```
+
+**검증:** `ls dist/index.html` 파일이 존재해야 합니다.
+
+### Step 2: 서버 시작
+
+```bash
+pnpm start
+# 서버가 http://127.0.0.1:8787 에서 시작됩니다
+```
+
+**검증:** `curl -s http://127.0.0.1:8787/api/health` 가 `{"ok":true, ...}` 를 반환해야 합니다.
+
+### Step 3: 대시보드 열기
+
+사용자에게 안내:
+
+```
+Claw-Kanban이 설치 완료되어 실행 중입니다!
+대시보드: http://127.0.0.1:8787
+```
+
+### 선택: AGENTS.md 설정
+
+AI 에이전트가 채팅 메시지에서 칸반 태스크를 자동 등록하도록 하려면:
+
+```bash
+pnpm setup
+# 워크스페이스 AGENTS.md에 오케스트레이션 규칙을 추가합니다
+```
+
+### 선택: 개발 모드
+
+핫 리로드로 개발하려면:
+
+```bash
+pnpm dev        # LAN 접근 가능 (0.0.0.0)
+pnpm dev:local  # localhost만 (127.0.0.1)
+# UI: http://127.0.0.1:5173  |  API: http://127.0.0.1:8787
+```
+
+### 문제 해결
+
+| 증상 | 원인 | 해결 |
+|------|------|------|
+| `pnpm build`에서 "node:sqlite" 오류 | Node.js 22 미만 | Node.js 22+로 업그레이드: `nvm install 22 && nvm use 22` |
+| 포트 8787 이미 사용 중 | 다른 프로세스가 포트 점유 | `lsof -i :8787`로 확인하거나, `PORT=9999 pnpm start`로 포트 변경 |
+| `curl /api/health` 연결 거부 | 서버 미실행 | Claw-Kanban 디렉토리에서 `pnpm start` 실행 |
+| Settings에 AI 프로바이더 없음 | CLI 도구 미설치 | 최소 하나 설치: `npm i -g @anthropic-ai/claude-code` |
+| 프로바이더 "Not Authenticated" 표시 | CLI 도구 미로그인 | 인증 명령 실행: `claude login`, `codex auth login`, 또는 `gemini auth login` |
 
 ---
 
@@ -43,7 +142,7 @@
 |------|------|------|
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm i -g @anthropic-ai/claude-code` | `claude login` |
 | [OpenAI Codex CLI](https://github.com/openai/codex) | `npm i -g @openai/codex` | `codex auth login` |
-| [Google Gemini CLI](https://github.com/google-gemini/gemini-cli) | `npm i -g @anthropic-ai/gemini-cli` | `gemini auth login` |
+| [Google Gemini CLI](https://github.com/google-gemini/gemini-cli) | `npm i -g @google/gemini-cli` | `gemini auth login` |
 
 ## 빠른 시작
 
@@ -274,7 +373,7 @@ Content-Type: application/json
 ### 헬스 체크
 
 ```bash
-GET /api/health    # { ok, dbPath, gateway }
+GET /api/health    # { ok, version, dbPath, gateway }
 ```
 
 ## CLI 감지
