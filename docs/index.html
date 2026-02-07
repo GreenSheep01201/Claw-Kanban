@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>claw-kanban - AI Agent Orchestration Kanban Board</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface-hover: #242836;
+      --border: #2d3148;
+      --text: #e4e6f0;
+      --text-dim: #8b8fa8;
+      --accent: #6c8cff;
+      --accent-glow: rgba(108, 140, 255, 0.15);
+      --green: #4ade80;
+      --orange: #fb923c;
+      --purple: #a78bfa;
+      --pink: #f472b6;
+      --radius: 12px;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    .container {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* ─── Hero ─── */
+    .hero {
+      text-align: center;
+      padding: 80px 0 60px;
+    }
+
+    .hero h1 {
+      font-size: 2.8rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 16px;
+    }
+
+    .hero h1 span {
+      background: linear-gradient(135deg, var(--accent), var(--purple));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .hero p {
+      color: var(--text-dim);
+      font-size: 1.15rem;
+      max-width: 600px;
+      margin: 0 auto 40px;
+    }
+
+    /* ─── Install Box ─── */
+    .install-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      max-width: 680px;
+      margin: 0 auto 16px;
+      position: relative;
+    }
+
+    .install-tabs {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 16px;
+    }
+
+    .install-tab {
+      padding: 6px 16px;
+      border-radius: 8px;
+      border: none;
+      background: transparent;
+      color: var(--text-dim);
+      cursor: pointer;
+      font-size: 0.9rem;
+      font-family: inherit;
+      transition: all 0.2s;
+    }
+
+    .install-tab.active {
+      background: var(--accent-glow);
+      color: var(--accent);
+    }
+
+    .install-tab:hover {
+      color: var(--text);
+    }
+
+    .install-cmd {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--bg);
+      border-radius: 8px;
+      padding: 14px 16px;
+      font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+      font-size: 0.88rem;
+      overflow-x: auto;
+    }
+
+    .install-cmd code {
+      flex: 1;
+      color: var(--green);
+      white-space: nowrap;
+    }
+
+    .copy-btn {
+      flex-shrink: 0;
+      padding: 6px 14px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text-dim);
+      cursor: pointer;
+      font-size: 0.8rem;
+      font-family: inherit;
+      transition: all 0.2s;
+    }
+
+    .copy-btn:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .copy-btn.copied {
+      border-color: var(--green);
+      color: var(--green);
+    }
+
+    /* ─── Features ─── */
+    .features {
+      padding: 60px 0;
+    }
+
+    .features h2 {
+      text-align: center;
+      font-size: 1.6rem;
+      margin-bottom: 40px;
+      color: var(--text);
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 20px;
+    }
+
+    @media (max-width: 640px) {
+      .feature-grid { grid-template-columns: 1fr; }
+      .hero h1 { font-size: 2rem; }
+    }
+
+    .feature-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      transition: border-color 0.2s;
+    }
+
+    .feature-card:hover {
+      border-color: var(--accent);
+    }
+
+    .feature-icon {
+      font-size: 1.5rem;
+      margin-bottom: 12px;
+    }
+
+    .feature-card h3 {
+      font-size: 1.05rem;
+      margin-bottom: 8px;
+    }
+
+    .feature-card p {
+      color: var(--text-dim);
+      font-size: 0.9rem;
+    }
+
+    /* ─── How It Works ─── */
+    .how-it-works {
+      padding: 60px 0;
+    }
+
+    .how-it-works h2 {
+      text-align: center;
+      font-size: 1.6rem;
+      margin-bottom: 40px;
+    }
+
+    .flow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .flow-step {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 20px;
+      font-size: 0.9rem;
+      font-weight: 500;
+      text-align: center;
+      min-width: 100px;
+    }
+
+    .flow-step.active {
+      border-color: var(--accent);
+      background: var(--accent-glow);
+      color: var(--accent);
+    }
+
+    .flow-arrow {
+      color: var(--text-dim);
+      font-size: 1.2rem;
+    }
+
+    /* ─── Footer ─── */
+    .footer {
+      text-align: center;
+      padding: 40px 0 60px;
+      border-top: 1px solid var(--border);
+    }
+
+    .footer a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    .footer a:hover {
+      text-decoration: underline;
+    }
+
+    .footer p {
+      color: var(--text-dim);
+      font-size: 0.9rem;
+      margin-top: 8px;
+    }
+
+    .badge-row {
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+      margin-top: 24px;
+      flex-wrap: wrap;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 20px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      font-size: 0.8rem;
+      color: var(--text-dim);
+    }
+
+    .badge .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+  </style>
+</head>
+<body>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="container">
+    <h1><span>claw-kanban</span></h1>
+    <p>AI Agent Orchestration Kanban Board. Route tasks to Claude Code, Codex CLI, and Gemini CLI with intelligent role-based auto-assignment.</p>
+
+    <div class="install-box">
+      <div class="install-tabs">
+        <button class="install-tab active" data-os="unix">macOS / Linux</button>
+        <button class="install-tab" data-os="win">Windows</button>
+      </div>
+      <div class="install-cmd" id="cmd-unix">
+        <code>curl -fsSL https://raw.githubusercontent.com/GreenSheep01201/claw-kanban/main/install.sh | bash</code>
+        <button class="copy-btn" onclick="copyCmd('unix')">Copy</button>
+      </div>
+      <div class="install-cmd" id="cmd-win" style="display:none">
+        <code>irm https://raw.githubusercontent.com/GreenSheep01201/claw-kanban/main/install.ps1 | iex</code>
+        <button class="copy-btn" onclick="copyCmd('win')">Copy</button>
+      </div>
+    </div>
+
+    <div class="badge-row">
+      <span class="badge"><span class="dot" style="background:var(--green)"></span> Node 22+</span>
+      <span class="badge"><span class="dot" style="background:var(--accent)"></span> TypeScript</span>
+      <span class="badge"><span class="dot" style="background:var(--orange)"></span> React</span>
+      <span class="badge"><span class="dot" style="background:var(--purple)"></span> SQLite</span>
+    </div>
+  </div>
+</section>
+
+<!-- Features -->
+<section class="features">
+  <div class="container">
+    <h2>Features</h2>
+    <div class="feature-grid">
+      <div class="feature-card">
+        <div class="feature-icon" style="color:var(--accent)">&#9878;</div>
+        <h3>Multi-Agent Routing</h3>
+        <p>Automatically assign tasks to Claude Code, Codex CLI, or Gemini CLI based on role (devops/backend/frontend) and task type.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon" style="color:var(--green)">&#10003;</div>
+        <h3>Auto-Review</h3>
+        <p>When an agent completes work, an automatic review is triggered. Pass review and the card moves to Done.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon" style="color:var(--orange)">&#9889;</div>
+        <h3>Gateway Integration</h3>
+        <p>Optional OpenClaw gateway integration sends wake notifications on card status changes via WebSocket.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon" style="color:var(--purple)">&#9000;</div>
+        <h3>Terminal Viewer</h3>
+        <p>Live streaming terminal output from running agents. Parses JSON streams from Claude, Codex, and Gemini.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- How It Works -->
+<section class="how-it-works">
+  <div class="container">
+    <h2>How It Works</h2>
+    <div class="flow">
+      <div class="flow-step active">Inbox</div>
+      <span class="flow-arrow">&rarr;</span>
+      <div class="flow-step">Planned</div>
+      <span class="flow-arrow">&rarr;</span>
+      <div class="flow-step">In Progress</div>
+      <span class="flow-arrow">&rarr;</span>
+      <div class="flow-step">Review/Test</div>
+      <span class="flow-arrow">&rarr;</span>
+      <div class="flow-step" style="border-color:var(--green);color:var(--green)">Done</div>
+    </div>
+    <p style="text-align:center; color:var(--text-dim); margin-top:24px; font-size:0.95rem;">
+      Type <code style="color:var(--green); background:var(--surface); padding:2px 8px; border-radius:4px"># Fix the login bug</code> in your chatbot &rarr; card appears in Inbox &rarr; agent auto-assigned &rarr; work done &rarr; auto-reviewed &rarr; Done.
+    </p>
+  </div>
+</section>
+
+<!-- Footer -->
+<section class="footer">
+  <div class="container">
+    <a href="https://github.com/GreenSheep01201/claw-kanban">GitHub Repository</a>
+    <p>Apache-2.0 License</p>
+  </div>
+</section>
+
+<script>
+  // Tab switching
+  document.querySelectorAll('.install-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.install-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      const os = tab.dataset.os;
+      document.getElementById('cmd-unix').style.display = os === 'unix' ? 'flex' : 'none';
+      document.getElementById('cmd-win').style.display = os === 'win' ? 'flex' : 'none';
+    });
+  });
+
+  // Copy to clipboard
+  function copyCmd(os) {
+    const el = document.querySelector(`#cmd-${os} code`);
+    const btn = document.querySelector(`#cmd-${os} .copy-btn`);
+    navigator.clipboard.writeText(el.textContent).then(() => {
+      btn.textContent = 'Copied!';
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.textContent = 'Copy';
+        btn.classList.remove('copied');
+      }, 2000);
+    });
+  }
+</script>
+
+</body>
+</html>
