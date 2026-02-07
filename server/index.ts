@@ -548,23 +548,61 @@ type CliStatusResult = Record<string, CliToolStatus>;
 let cachedCliStatus: { data: CliStatusResult; loadedAt: number } | null = null;
 const CLI_STATUS_TTL = 30_000;
 
-const CLI_TOOLS = [
+interface CliToolDef {
+  name: string;
+  authHint: string;
+  checkAuth: () => boolean;
+}
+
+function jsonHasKey(filePath: string, key: string): boolean {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const j = JSON.parse(raw);
+    return j != null && typeof j === "object" && key in j && j[key] != null;
+  } catch {
+    return false;
+  }
+}
+
+function fileExistsNonEmpty(filePath: string): boolean {
+  try {
+    const stat = fs.statSync(filePath);
+    return stat.isFile() && stat.size > 2;
+  } catch {
+    return false;
+  }
+}
+
+const CLI_TOOLS: CliToolDef[] = [
   {
     name: "claude",
-    authFiles: [".claude.json", ".claude/auth.json"],
     authHint: "Run: claude login",
+    checkAuth: () => {
+      const home = os.homedir();
+      // Claude stores auth in oauthAccount key inside ~/.claude.json
+      if (jsonHasKey(path.join(home, ".claude.json"), "oauthAccount")) return true;
+      // Fallback: some versions use ~/.claude/auth.json
+      return fileExistsNonEmpty(path.join(home, ".claude", "auth.json"));
+    },
   },
   {
     name: "codex",
-    authFiles: [".codex/auth.json"],
     authHint: "Run: codex auth login",
+    checkAuth: () => {
+      const authPath = path.join(os.homedir(), ".codex", "auth.json");
+      // Codex stores OPENAI_API_KEY or oauth tokens
+      return jsonHasKey(authPath, "OPENAI_API_KEY") || jsonHasKey(authPath, "tokens");
+    },
   },
   {
     name: "gemini",
-    authFiles: [".gemini/oauth_creds.json"],
     authHint: "Run: gemini auth login",
+    checkAuth: () => {
+      const authPath = path.join(os.homedir(), ".gemini", "oauth_creds.json");
+      return jsonHasKey(authPath, "access_token");
+    },
   },
-] as const;
+];
 
 function execWithTimeout(cmd: string, args: string[], timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -576,21 +614,7 @@ function execWithTimeout(cmd: string, args: string[], timeoutMs: number): Promis
   });
 }
 
-function checkAuthFiles(toolName: string, authFiles: readonly string[]): boolean {
-  const home = os.homedir();
-  for (const f of authFiles) {
-    const fullPath = path.join(home, f);
-    try {
-      const stat = fs.statSync(fullPath);
-      if (stat.isFile() && stat.size > 2) return true;
-    } catch {
-      // file doesn't exist
-    }
-  }
-  return false;
-}
-
-async function detectCliTool(tool: typeof CLI_TOOLS[number]): Promise<CliToolStatus> {
+async function detectCliTool(tool: CliToolDef): Promise<CliToolStatus> {
   let installed = false;
   let version: string | null = null;
 
@@ -612,7 +636,7 @@ async function detectCliTool(tool: typeof CLI_TOOLS[number]): Promise<CliToolSta
     // binary found but --version failed; still counts as installed
   }
 
-  const authenticated = checkAuthFiles(tool.name, tool.authFiles);
+  const authenticated = tool.checkAuth();
   return { installed, version, authenticated, authHint: tool.authHint };
 }
 
