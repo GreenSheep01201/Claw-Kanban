@@ -31,6 +31,10 @@ try {
   }
 } catch { /* ignore .env read errors */ }
 
+const PKG_VERSION: string = JSON.parse(
+  fs.readFileSync(path.resolve(__server_dirname, "..", "package.json"), "utf8"),
+).version ?? "1.0.0";
+
 const PORT = Number(process.env.PORT ?? 8787);
 const HOST = process.env.HOST ?? "127.0.0.1"; // set 0.0.0.0 for Tailscale/LAN
 
@@ -294,7 +298,7 @@ async function sendGatewayWake(text: string): Promise<void> {
       client: {
         id: "cli",
         displayName: "Claw-Kanban",
-        version: "Claw-Kanban",
+        version: PKG_VERSION,
         platform: process.platform,
         mode: "backend",
         instanceId,
@@ -491,6 +495,7 @@ const createCardSchema = z.object({
 
 const buildHealthPayload = () => ({
   ok: true,
+  version: PKG_VERSION,
   dbPath,
   gateway: OPENCLAW_CONFIG_PATH ? "configured" : "not configured",
 });
@@ -1352,7 +1357,7 @@ if (isProduction) {
 }
 
 app.listen(PORT, HOST, () => {
-  console.log(`[Claw-Kanban] listening on http://${HOST}:${PORT} (db: ${dbPath})`);
+  console.log(`[Claw-Kanban] v${PKG_VERSION} listening on http://${HOST}:${PORT} (db: ${dbPath})`);
   if (isProduction) {
     console.log(`[Claw-Kanban] mode: production (serving UI from ${distDir})`);
   } else {
