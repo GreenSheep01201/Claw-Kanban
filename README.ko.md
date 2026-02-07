@@ -132,6 +132,40 @@ pnpm dev:local  # localhost만 (127.0.0.1)
 - **SQLite 저장소** — Node.js 내장 `node:sqlite`로 설정 없이 파일 기반 DB 사용
 - **크로스 플랫폼** — macOS, Linux, Windows 지원
 
+## 스크린샷
+
+### 칸반 대시보드
+
+<p align="center">
+  <img src="sample_img/dashboard.png" width="800" alt="Claw-Kanban 대시보드" />
+</p>
+
+> 6단계 칸반 보드와 카드 상세 패널. 태스크 생성, AI 에이전트 배정, 실시간 진행 상황 모니터링.
+
+### 프로바이더 설정
+
+<p align="center">
+  <img src="sample_img/provider_setting.png" width="600" alt="프로바이더 설정" />
+</p>
+
+> 설치된 AI CLI 도구(Claude Code, Codex CLI, Gemini CLI)를 자동 감지하고 역할 기반 프로바이더 매핑을 설정합니다.
+
+### 실시간 터미널 뷰어
+
+<p align="center">
+  <img src="sample_img/claude_code_tm.png" width="800" alt="터미널 뷰어" />
+</p>
+
+> 실행 중인 AI 에이전트의 출력을 실시간으로 스트리밍. 하단 자동 스크롤, 팔로우 모드, 전체 로그 이력 확인 가능.
+
+### Telegram 연동
+
+<p align="center">
+  <img src="sample_img/telegram.png" width="400" alt="Telegram 연동" />
+</p>
+
+> Telegram에서 `# 태스크 설명` 형식으로 메시지를 보내면 칸반 카드가 생성됩니다. 에이전트가 자동 실행되고 완료 시 알림을 보냅니다.
+
 ## 사전 요구 사항
 
 - **Node.js 22+** (`node:sqlite` 사용을 위해 필수)

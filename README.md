@@ -132,6 +132,40 @@ pnpm dev:local  # localhost only (127.0.0.1)
 - **SQLite Storage** — Zero-config, file-based database via Node.js built-in `node:sqlite`
 - **Cross-Platform** — macOS, Linux, and Windows
 
+## Screenshots
+
+### Kanban Dashboard
+
+<p align="center">
+  <img src="sample_img/dashboard.png" width="800" alt="Claw-Kanban Dashboard" />
+</p>
+
+> 6-column kanban board with card detail panel. Create tasks, assign AI agents, and monitor progress in real-time.
+
+### Provider Settings
+
+<p align="center">
+  <img src="sample_img/provider_setting.png" width="600" alt="Provider Settings" />
+</p>
+
+> Auto-detect installed AI CLI tools (Claude Code, Codex CLI, Gemini CLI) and configure role-based provider mapping.
+
+### Real-time Terminal Viewer
+
+<p align="center">
+  <img src="sample_img/claude_code_tm.png" width="800" alt="Terminal Viewer" />
+</p>
+
+> Live streaming output from running AI agents. Scroll to bottom, follow mode, and full log history.
+
+### Telegram Integration
+
+<p align="center">
+  <img src="sample_img/telegram.png" width="400" alt="Telegram Integration" />
+</p>
+
+> Send `# task description` via Telegram to create a kanban card. The agent auto-runs and reports back when done.
+
 ## Prerequisites
 
 - **Node.js 22+** (required for `node:sqlite`)
