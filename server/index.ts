@@ -589,17 +589,24 @@ const CLI_TOOLS: CliToolDef[] = [
     name: "codex",
     authHint: "Run: codex auth login",
     checkAuth: () => {
+      // File-based auth: ~/.codex/auth.json
       const authPath = path.join(os.homedir(), ".codex", "auth.json");
-      // Codex stores OPENAI_API_KEY or oauth tokens
-      return jsonHasKey(authPath, "OPENAI_API_KEY") || jsonHasKey(authPath, "tokens");
+      if (jsonHasKey(authPath, "OPENAI_API_KEY") || jsonHasKey(authPath, "tokens")) return true;
+      // Env var fallback (keyring mode or manual config)
+      if (process.env.OPENAI_API_KEY) return true;
+      return false;
     },
   },
   {
     name: "gemini",
     authHint: "Run: gemini auth login",
     checkAuth: () => {
-      const authPath = path.join(os.homedir(), ".gemini", "oauth_creds.json");
-      return jsonHasKey(authPath, "access_token");
+      // macOS/Linux: ~/.gemini/oauth_creds.json
+      if (jsonHasKey(path.join(os.homedir(), ".gemini", "oauth_creds.json"), "access_token")) return true;
+      // Windows: %APPDATA%\gcloud\application_default_credentials.json
+      const appData = process.env.APPDATA;
+      if (appData && jsonHasKey(path.join(appData, "gcloud", "application_default_credentials.json"), "client_id")) return true;
+      return false;
     },
   },
 ];
