@@ -6,15 +6,15 @@
 
 <p align="center">
   <strong>AI Agent Orchestration Kanban Board</strong><br>
-  Route tasks to <b>Claude Code</b>, <b>Codex CLI</b>, and <b>Gemini CLI</b> with role-based auto-assignment and real-time monitoring.
+  Route tasks to <b>Claude Code</b>, <b>Codex CLI</b>, <b>Gemini CLI</b>, <b>OpenCode</b>, <b>GitHub Copilot</b>, and <b>Google Antigravity</b> with role-based auto-assignment and real-time monitoring.
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.1-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.0.2-blue" alt="Version" />
   <img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen" alt="Node.js 22+" />
   <img src="https://img.shields.io/badge/license-Apache%202.0-orange" alt="License" />
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey" alt="Platform" />
-  <img src="https://img.shields.io/badge/AI-Claude%20%7C%20Codex%20%7C%20Gemini-purple" alt="AI Agents" />
+  <img src="https://img.shields.io/badge/AI-Claude%20%7C%20Codex%20%7C%20Gemini%20%7C%20OpenCode%20%7C%20Copilot%20%7C%20Antigravity-purple" alt="AI Agents" />
 </p>
 
 <p align="center">
@@ -96,14 +96,16 @@ Claw-Kanban is installed and running!
 Dashboard: http://127.0.0.1:8787
 ```
 
-### Optional: AGENTS.md Setup
+### Step 3.5: AGENTS.md Setup (Required)
 
-If the user wants AI agents to auto-register kanban tasks from chat messages:
+This step is **required** for AI agent orchestration. It teaches your AI coding agent how to interact with the kanban board — without it, the agent cannot register tasks, route work, or manage cards.
 
 ```bash
 pnpm setup
 # This prepends orchestration rules to the workspace AGENTS.md
 ```
+
+**Verify:** Your workspace `AGENTS.md` should now contain `<!-- BEGIN claw-kanban orchestration rules -->` at the top.
 
 ### Optional: Development Mode
 
@@ -129,19 +131,53 @@ pnpm dev:local  # localhost only (127.0.0.1)
 
 ## Why?
 
-Using multiple AI coding agents (Claude Code, Codex CLI, Gemini CLI) means juggling multiple terminal windows, manually deciding which agent to use for each task, and waiting blindly until they finish. Claw-Kanban solves this by providing a single dashboard where you can:
+Using multiple AI coding agents (Claude Code, Codex CLI, Gemini CLI, OpenCode, Copilot, Antigravity) means juggling multiple terminal windows, manually deciding which agent to use for each task, and waiting blindly until they finish. Claw-Kanban solves this by providing a single dashboard where you can:
 
 - **Auto-assign agents by role** — no more manual switching between terminals
 - **Watch agents work in real-time** — no more blind waiting; see exactly what your agent is doing
 - **Dispatch tasks from your phone** — send `# fix the login bug` via Telegram and the agent handles the rest
+- **Use your existing CLI environment** — CLI agents inherit your skills, MCP servers, custom instructions, and all settings with zero additional configuration
+
+## Dual Execution Model
+
+Claw-Kanban supports **6 AI agents** through two execution modes:
+
+### CLI Agents — Your Environment, Your Rules
+
+| Agent | Execution | Setup |
+|-------|-----------|-------|
+| **Claude Code** | CLI spawn | `npm i -g @anthropic-ai/claude-code && claude login` |
+| **Codex CLI** | CLI spawn | `npm i -g @openai/codex && codex auth login` |
+| **Gemini CLI** | CLI spawn | `npm i -g @google/gemini-cli && gemini auth login` |
+| **OpenCode** | CLI spawn | `npm i -g opencode && opencode auth` |
+
+CLI agents spawn the actual CLI binary installed on your machine. This means **your entire personalized environment carries over automatically**:
+
+- Custom skills and agents you've configured
+- MCP server connections
+- Project-specific instructions (CLAUDE.md, etc.)
+- Authentication and API keys
+- All CLI settings and preferences
+
+**No additional setup needed** — if `claude`, `codex`, or `gemini` works in your terminal, it works in Claw-Kanban. This is the key advantage of CLI agents: they use your existing workflow as-is.
+
+### HTTP Agents — Zero Install, OAuth Only
+
+| Agent | Execution | Setup |
+|-------|-----------|-------|
+| **GitHub Copilot** | Direct API call | OAuth Connect in Settings |
+| **Google Antigravity** | Direct API call | OAuth Connect in Settings |
+
+HTTP agents call provider APIs directly from the server. No CLI installation required — just connect your GitHub or Google account via OAuth in the Settings panel. Tokens are encrypted at rest (AES-256-GCM).
 
 ## Features
 
 - **6-Column Kanban Board** — Inbox, Planned, In Progress, Review/Test, Done, Stopped
-- **Multi-Agent Orchestration** — Spawn and manage Claude Code, Codex CLI, and Gemini CLI processes
+- **Multi-Agent Orchestration** — Manage 6 AI agents: Claude Code, Codex CLI, Gemini CLI, OpenCode, GitHub Copilot, Google Antigravity
+- **Dual Execution Model** — CLI agents (spawn local processes, inherit your environment) + HTTP agents (direct API calls, OAuth only)
 - **Role-Based Auto-Assignment** — Automatically route tasks by role (DevOps / Backend / Frontend) and task type (New / Modify / Bugfix)
 - **AI Provider Detection** — Settings panel shows install and auth status for each CLI tool; unauthenticated providers are disabled in dropdowns
-- **OAuth Connect (optional)** — For environments where CLI auth isn't possible; connect via browser and store credentials server-side (encrypted)
+- **OAuth Connect (optional)** — For environments where CLI auth isn't possible, or to use Copilot/Antigravity; connect via browser and store credentials server-side (encrypted)
 - **Automatic Review** — After implementation completes, auto-trigger a review/test cycle via Claude
 - **Real-time Terminal Viewer** — Live agent output in the browser; no more waiting blindly for completion
 - **Chat-to-Card** — Send `# task description` via Telegram, Slack, or any webhook source to instantly create a kanban card
@@ -190,13 +226,23 @@ Using multiple AI coding agents (Claude Code, Codex CLI, Gemini CLI) means juggl
 
 - **Node.js 22+** (required for `node:sqlite`)
 - **pnpm** (recommended) or npm
-- At least one AI CLI tool installed and authenticated:
+- At least one AI agent available:
+
+**CLI Agents** — Install and authenticate the CLI tool. Your existing configuration (skills, agents, MCP servers, custom instructions) carries over automatically.
 
 | Tool | Install | Authenticate |
 |------|---------|-------------|
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm i -g @anthropic-ai/claude-code` | `claude login` |
 | [OpenAI Codex CLI](https://github.com/openai/codex) | `npm i -g @openai/codex` | `codex auth login` |
 | [Google Gemini CLI](https://github.com/google-gemini/gemini-cli) | `npm i -g @google/gemini-cli` | `gemini auth login` |
+| [OpenCode](https://github.com/opencode-ai/opencode) | `npm i -g opencode` | `opencode auth` |
+
+**HTTP Agents** — No CLI needed. Connect via OAuth in the Settings panel after starting the server.
+
+| Tool | Setup |
+|------|-------|
+| GitHub Copilot | Settings > OAuth Connect > GitHub |
+| Google Antigravity | Settings > OAuth Connect > Google |
 
 ## Quick Start
 
@@ -247,7 +293,9 @@ pnpm dev:local
 
 ```
 1. Task arrives (UI / API / webhook)  ──>  Card created in Inbox
-2. Click "Start" or auto-assign      ──>  CLI process spawned (Claude/Codex/Gemini)
+2. Click "Start" or auto-assign      ──>  Agent launched:
+   • CLI agents (Claude/Codex/Gemini) ──>  CLI process spawned (inherits your environment)
+   • HTTP agents (Copilot/Antigravity)──>  Direct API call (OAuth tokens)
 3. Card moves to "In Progress"       ──>  Real-time terminal logs available
 4. Agent completes (exit 0)           ──>  Card auto-moves to "Review/Test"
 5. Auto-review triggers               ──>  Claude reviews the work
@@ -436,8 +484,9 @@ Claw-Kanban/
 | Frontend | React 19 + TypeScript + Vite |
 | Backend | Express 5 + Node.js 22+ |
 | Database | SQLite (via `node:sqlite`, zero dependencies) |
-| AI Agents | Claude Code CLI, Codex CLI, Gemini CLI |
-| Process Mgmt | Node `child_process` (spawn + stdin piping) |
+| CLI Agents | Claude Code, Codex CLI, Gemini CLI, OpenCode (local process spawn) |
+| HTTP Agents | GitHub Copilot, Google Antigravity (direct API + OAuth) |
+| Process Mgmt | Node `child_process` (CLI) + `fetch` streaming (HTTP) |
 
 ## API Reference
 
@@ -513,6 +562,9 @@ Claw-Kanban is a **local development tool**. Important notes:
 - **Environment Inheritance** — Child processes inherit the server's environment.
 - **CORS** — Open CORS enabled for Vite dev proxy. Do not expose to the public internet.
 - **OAuth token storage** — OAuth tokens are stored **server-side only** in SQLite and encrypted at rest using `OAUTH_ENCRYPTION_SECRET` (AES-256-GCM). The browser never receives refresh tokens.
+- **Built-in OAuth Client IDs** — The GitHub and Google OAuth client IDs/secrets embedded in the source code are **public OAuth app credentials**, not user secrets. Per [Google's documentation](https://developers.google.com/identity/protocols/oauth2/native-app), client secrets for installed/desktop apps are "not treated as a secret." This is standard practice for open-source apps (VS Code, Thunderbird, GitHub CLI, etc.). These credentials only identify the app itself — your personal tokens are always encrypted separately.
+- **No personal credentials in source** — All user-specific tokens (GitHub, Google OAuth) are stored encrypted in the local SQLite database, never in source code. The encryption key is derived from your `OAUTH_ENCRYPTION_SECRET` environment variable.
+- **Copilot token caching** — Exchanged Copilot session tokens are cached in-memory only (never written to disk) and auto-expire. Cache is invalidated on re-authentication.
 
 ## Platform Support
 
@@ -542,6 +594,15 @@ systemctl --user status claw-kanban
 ```
 
 ## Changelog
+
+### v1.0.2
+
+- **GitHub Copilot direct API** — OAuth token exchange + OpenAI-compatible chat completions streaming, no opencode CLI needed
+- **Google Antigravity direct API** — Uses `cloudcode-pa` endpoint with automatic GCP project discovery (`loadCodeAssist`), transparent token refresh
+- **Dual execution model** — CLI agents (Claude/Codex/Gemini) spawn local processes inheriting your environment; HTTP agents (Copilot/Antigravity) call APIs directly via OAuth
+- **Race condition fix** — DB writes now happen synchronously before async HTTP agent launch
+- **Copilot token cache fix** — Added sourceHash validation to prevent stale credentials after re-authentication
+- **SSE stream fixes** — Final buffer flush, proper log stream await, negative PID handling for stop/delete
 
 ### v1.0.1
 

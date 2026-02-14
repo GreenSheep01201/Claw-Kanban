@@ -151,14 +151,11 @@ function buildAgentArgs(agent: string): string[] {
       if (model) args.push("--model", model);
       return args;
     }
-    case "copilot": {
-      const model = modelConfig.copilot?.model || "github-copilot/claude-sonnet-4.5";
-      return ["opencode", "run", "--format", "json", "--model", model];
-    }
-    case "antigravity": {
-      const model = modelConfig.antigravity?.model || "github-copilot/gemini-2.5-pro";
-      return ["opencode", "run", "--format", "json", "--model", model];
-    }
+    case "copilot":
+    case "antigravity":
+      // These agents use direct HTTP API calls (executeHttpAgent), not CLI spawn.
+      // This branch should never be reached; kept for type safety.
+      throw new Error(`${agent} uses HTTP agent (not CLI spawn)`);
     default:
       throw new Error(`unsupported agent: ${agent}`);
   }
@@ -219,6 +216,294 @@ function spawnAgent(
   if (process.platform !== "win32") child.unref();
 
   return child;
+}
+
+// --- HTTP Agent: direct API calls for copilot/antigravity (no CLI dependency) ---
+
+let httpAgentCounter = Date.now() % 1_000_000;
+
+/**
+ * Launch an HTTP agent (copilot/antigravity) as a fire-and-forget async task.
+ * Setup is synchronous (registers in activeProcesses immediately);
+ * the caller must write DB rows before calling this.
+ */
+function launchHttpAgent(
+  cardId: string,
+  agent: "copilot" | "antigravity",
+  prompt: string,
+  projectPath: string,
+  logPath: string,
+  controller: AbortController,
+  fakePid: number,
+): void {
+  const logStream = fs.createWriteStream(logPath, { flags: "w" });
+
+  // Save prompt for debugging
+  const promptPath = path.join(logsDir, `${cardId}.prompt.txt`);
+  fs.writeFileSync(promptPath, prompt, "utf8");
+
+  // Register in activeProcesses with a mock ChildProcess so stop works uniformly
+  const mockProc = {
+    pid: fakePid,
+    kill: () => { controller.abort(); return true; },
+  } as unknown as ChildProcess;
+  activeProcesses.set(cardId, mockProc);
+
+  // Fire-and-forget async task (all errors caught internally)
+  const runTask = (async () => {
+    let exitCode = 0;
+    try {
+      if (agent === "copilot") {
+        await executeCopilotAgent(prompt, projectPath, logStream, controller.signal);
+      } else {
+        await executeAntigravityAgent(prompt, logStream, controller.signal);
+      }
+    } catch (err: any) {
+      exitCode = 1;
+      if (err.name !== "AbortError") {
+        const msg = `[${agent}] Error: ${err.message}\n`;
+        logStream.write(msg);
+        console.error(`[Claw-Kanban] HTTP agent error (${agent}, card ${cardId}): ${err.message}`);
+      } else {
+        logStream.write(`[${agent}] Aborted by user\n`);
+      }
+    } finally {
+      await new Promise<void>((resolve) => logStream.end(resolve));
+      try { fs.unlinkSync(promptPath); } catch { /* ignore */ }
+      handleRunComplete(cardId, exitCode, projectPath);
+    }
+  })();
+
+  runTask.catch(() => {});
+}
+
+async function executeCopilotAgent(
+  prompt: string,
+  projectPath: string,
+  logStream: fs.WriteStream,
+  signal: AbortSignal,
+): Promise<void> {
+  const modelConfig = getProviderModelConfig();
+  const rawModel = modelConfig.copilot?.model || "github-copilot/gpt-4o";
+  // Strip provider prefix: "github-copilot/gpt-4o" → "gpt-4o"
+  const model = rawModel.includes("/") ? rawModel.split("/").pop()! : rawModel;
+
+  // Get GitHub OAuth token
+  const cred = getDecryptedOAuthToken("github") ?? getDecryptedOAuthToken("copilot_pat");
+  if (!cred?.accessToken) throw new Error("No GitHub OAuth token found. Connect GitHub Copilot first.");
+
+  logStream.write(`[copilot] Exchanging Copilot token...\n`);
+  const { token, baseUrl } = await exchangeCopilotToken(cred.accessToken);
+  logStream.write(`[copilot] Model: ${model}, Base: ${baseUrl}\n---\n`);
+
+  const resp = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "Editor-Version": "claw-kanban/1.0",
+      "Copilot-Integration-Id": "vscode-chat",
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: "system", content: `You are a coding assistant. Project path: ${projectPath}` },
+        { role: "user", content: prompt },
+      ],
+      stream: true,
+    }),
+    signal,
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Copilot API error (${resp.status}): ${text}`);
+  }
+
+  // Parse SSE stream
+  await parseSSEStream(resp.body!, logStream, signal);
+  logStream.write(`\n---\n[copilot] Done.\n`);
+}
+
+// --- Antigravity (cloudcode-pa) endpoint helpers ---
+const ANTIGRAVITY_ENDPOINTS = [
+  "https://cloudcode-pa.googleapis.com",
+  "https://daily-cloudcode-pa.sandbox.googleapis.com",
+  "https://autopush-cloudcode-pa.sandbox.googleapis.com",
+];
+const ANTIGRAVITY_DEFAULT_PROJECT = "rising-fact-p41fc";
+let antigravityProjectCache: { projectId: string; tokenHash: string } | null = null;
+
+async function loadCodeAssistProject(accessToken: string, signal?: AbortSignal): Promise<string> {
+  const tokenHash = createHash("sha256").update(accessToken).digest("hex").slice(0, 16);
+  if (antigravityProjectCache && antigravityProjectCache.tokenHash === tokenHash) {
+    return antigravityProjectCache.projectId;
+  }
+  // Try each endpoint in order
+  for (const endpoint of ANTIGRAVITY_ENDPOINTS) {
+    try {
+      const resp = await fetch(`${endpoint}/v1internal:loadCodeAssist`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+          "User-Agent": "google-api-nodejs-client/9.15.1",
+          "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
+          "Client-Metadata": JSON.stringify({ ideType: "ANTIGRAVITY", platform: process.platform === "win32" ? "WINDOWS" : "MACOS", pluginType: "GEMINI" }),
+        },
+        body: JSON.stringify({
+          metadata: { ideType: "ANTIGRAVITY", platform: process.platform === "win32" ? "WINDOWS" : "MACOS", pluginType: "GEMINI" },
+        }),
+        signal,
+      });
+      if (!resp.ok) continue;
+      const data = await resp.json() as any;
+      const proj = data?.cloudaicompanionProject?.id ?? data?.cloudaicompanionProject;
+      if (typeof proj === "string" && proj) {
+        antigravityProjectCache = { projectId: proj, tokenHash };
+        return proj;
+      }
+    } catch { /* try next endpoint */ }
+  }
+  // Fallback to default project
+  antigravityProjectCache = { projectId: ANTIGRAVITY_DEFAULT_PROJECT, tokenHash };
+  return ANTIGRAVITY_DEFAULT_PROJECT;
+}
+
+async function executeAntigravityAgent(
+  prompt: string,
+  logStream: fs.WriteStream,
+  signal: AbortSignal,
+): Promise<void> {
+  const modelConfig = getProviderModelConfig();
+  const rawModel = modelConfig.antigravity?.model || "google/antigravity-gemini-2.5-pro";
+  // Strip provider prefix: "google/antigravity-gemini-2.5-pro" → "gemini-2.5-pro"
+  let model = rawModel;
+  if (model.includes("antigravity-")) {
+    model = model.slice(model.indexOf("antigravity-") + "antigravity-".length);
+  } else if (model.includes("/")) {
+    model = model.split("/").pop()!;
+  }
+
+  // Get Google OAuth token
+  const cred = getDecryptedOAuthToken("google_antigravity");
+  if (!cred?.accessToken) throw new Error("No Google OAuth token found. Connect Antigravity first.");
+
+  logStream.write(`[antigravity] Refreshing token...\n`);
+  const accessToken = await refreshGoogleToken(cred);
+
+  logStream.write(`[antigravity] Discovering project...\n`);
+  const projectId = await loadCodeAssistProject(accessToken, signal);
+  logStream.write(`[antigravity] Model: ${model}, Project: ${projectId}\n---\n`);
+
+  // Use Antigravity endpoint (cloudcode-pa) with wrapped request format
+  const baseEndpoint = ANTIGRAVITY_ENDPOINTS[0];
+  const url = `${baseEndpoint}/v1internal:streamGenerateContent?alt=sse`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+      "User-Agent": `antigravity/1.15.8 ${process.platform === "darwin" ? "darwin/arm64" : "linux/amd64"}`,
+      "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
+      "Client-Metadata": JSON.stringify({ ideType: "ANTIGRAVITY", platform: process.platform === "win32" ? "WINDOWS" : "MACOS", pluginType: "GEMINI" }),
+    },
+    body: JSON.stringify({
+      project: projectId,
+      model,
+      requestType: "agent",
+      userAgent: "antigravity",
+      requestId: `agent-${randomUUID()}`,
+      request: {
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+      },
+    }),
+    signal,
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Antigravity API error (${resp.status}): ${text}`);
+  }
+
+  await parseGeminiSSEStream(resp.body!, logStream, signal);
+  logStream.write(`\n---\n[antigravity] Done.\n`);
+}
+
+// Parse OpenAI-compatible SSE stream (for Copilot)
+async function parseSSEStream(
+  body: ReadableStream<Uint8Array>,
+  logStream: fs.WriteStream,
+  signal: AbortSignal,
+): Promise<void> {
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const processLine = (trimmed: string) => {
+    if (!trimmed || trimmed.startsWith(":")) return;
+    if (!trimmed.startsWith("data: ")) return;
+    if (trimmed === "data: [DONE]") return;
+    try {
+      const data = JSON.parse(trimmed.slice(6));
+      const delta = data.choices?.[0]?.delta;
+      if (delta?.content) logStream.write(delta.content);
+    } catch { /* ignore */ }
+  };
+
+  for await (const chunk of body as AsyncIterable<Uint8Array>) {
+    if (signal.aborted) break;
+    buffer += decoder.decode(chunk, { stream: true });
+
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) processLine(line.trim());
+  }
+
+  // Flush remaining buffer
+  if (buffer.trim()) processLine(buffer.trim());
+}
+
+// Parse Gemini/Antigravity SSE stream
+async function parseGeminiSSEStream(
+  body: ReadableStream<Uint8Array>,
+  logStream: fs.WriteStream,
+  signal: AbortSignal,
+): Promise<void> {
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const processLine = (trimmed: string) => {
+    if (!trimmed || trimmed.startsWith(":")) return;
+    if (!trimmed.startsWith("data: ")) return;
+    try {
+      const data = JSON.parse(trimmed.slice(6));
+      // Antigravity wrapped format: data.response.candidates[].content.parts[].text
+      const candidates = data.response?.candidates ?? data.candidates;
+      if (Array.isArray(candidates)) {
+        for (const candidate of candidates) {
+          const parts = candidate?.content?.parts;
+          if (Array.isArray(parts)) {
+            for (const part of parts) {
+              if (part.text) logStream.write(part.text);
+            }
+          }
+        }
+      }
+    } catch { /* ignore */ }
+  };
+
+  for await (const chunk of body as AsyncIterable<Uint8Array>) {
+    if (signal.aborted) break;
+    buffer += decoder.decode(chunk, { stream: true });
+
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) processLine(line.trim());
+  }
+
+  // Flush remaining buffer
+  if (buffer.trim()) processLine(buffer.trim());
 }
 
 db.exec(`
@@ -849,6 +1134,109 @@ function getOAuthCredential(provider: OAuthCredentialProvider): OAuthCredentialR
     .prepare("SELECT provider, email, created_at, updated_at, expires_at, scope, refresh_token_enc FROM oauth_credentials WHERE provider = ?")
     .get(provider) as OAuthCredentialRow | undefined;
   return row ?? null;
+}
+
+// --- Direct API token helpers (for HTTP agent execution without CLI dependency) ---
+
+interface DecryptedOAuthToken {
+  accessToken: string | null;
+  refreshToken: string | null;
+  expiresAt: number | null;
+  email: string | null;
+}
+
+function getDecryptedOAuthToken(provider: OAuthCredentialProvider): DecryptedOAuthToken | null {
+  const row = db
+    .prepare("SELECT access_token_enc, refresh_token_enc, expires_at, email FROM oauth_credentials WHERE provider = ?")
+    .get(provider) as { access_token_enc: string | null; refresh_token_enc: string | null; expires_at: number | null; email: string | null } | undefined;
+  if (!row) return null;
+  return {
+    accessToken: row.access_token_enc ? decryptSecret(row.access_token_enc) : null,
+    refreshToken: row.refresh_token_enc ? decryptSecret(row.refresh_token_enc) : null,
+    expiresAt: row.expires_at,
+    email: row.email,
+  };
+}
+
+async function refreshGoogleToken(credential: DecryptedOAuthToken): Promise<string> {
+  // Normalize expiresAt: if stored in seconds (< 1e12), convert to ms
+  const expiresAtMs = credential.expiresAt && credential.expiresAt < 1e12
+    ? credential.expiresAt * 1000
+    : credential.expiresAt;
+  // If token hasn't expired yet (with 60s margin), return it
+  if (credential.accessToken && expiresAtMs && expiresAtMs > Date.now() + 60_000) {
+    return credential.accessToken;
+  }
+  if (!credential.refreshToken) {
+    throw new Error("Google OAuth token expired and no refresh_token available");
+  }
+  const clientId = process.env.OAUTH_GOOGLE_CLIENT_ID ?? BUILTIN_GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.OAUTH_GOOGLE_CLIENT_SECRET ?? BUILTIN_GOOGLE_CLIENT_SECRET;
+  const resp = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: credential.refreshToken,
+      grant_type: "refresh_token",
+    }),
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Google token refresh failed (${resp.status}): ${text}`);
+  }
+  const data = await resp.json() as { access_token: string; expires_in?: number };
+  const newExpiresAt = data.expires_in ? Date.now() + data.expires_in * 1000 : null;
+  // Update DB with new access token
+  upsertOAuthCredential({
+    provider: "google_antigravity",
+    accessToken: data.access_token,
+    refreshToken: credential.refreshToken,
+    expiresAt: newExpiresAt,
+    email: credential.email,
+  });
+  return data.access_token;
+}
+
+// Copilot token cache (in-memory, shared across requests)
+let copilotTokenCache: { token: string; baseUrl: string; expiresAt: number; sourceHash: string } | null = null;
+
+async function exchangeCopilotToken(githubToken: string): Promise<{ token: string; baseUrl: string; expiresAt: number }> {
+  // Return cached token if still valid (5 min margin) and source token matches
+  const sourceHash = createHash("sha256").update(githubToken).digest("hex").slice(0, 16);
+  if (copilotTokenCache
+      && copilotTokenCache.expiresAt > Date.now() + 5 * 60_000
+      && copilotTokenCache.sourceHash === sourceHash) {
+    return copilotTokenCache;
+  }
+  const resp = await fetch("https://api.github.com/copilot_internal/v2/token", {
+    headers: {
+      Authorization: `Bearer ${githubToken}`,
+      Accept: "application/json",
+      "User-Agent": "claw-kanban",
+    },
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Copilot token exchange failed (${resp.status}): ${text}`);
+  }
+  const data = await resp.json() as { token: string; expires_at: number; endpoints?: { api?: string } };
+  // Extract base URL from token's proxy-ep or endpoints
+  let baseUrl = "https://api.individual.githubcopilot.com";
+  // Try parsing from token (tid=...;proxy-ep=...)
+  const proxyMatch = data.token.match(/proxy-ep=([^;]+)/);
+  if (proxyMatch) {
+    const proxyHost = proxyMatch[1];
+    // Convert proxy.* to api.*
+    baseUrl = `https://${proxyHost.replace(/^proxy\./, "api.")}`;
+  }
+  if (data.endpoints?.api) {
+    baseUrl = data.endpoints.api.replace(/\/$/, "");
+  }
+  const expiresAt = data.expires_at * 1000; // convert unix seconds to ms
+  copilotTokenCache = { token: data.token, baseUrl, expiresAt, sourceHash };
+  return copilotTokenCache;
 }
 
 function buildOAuthStatus() {
@@ -1697,6 +2085,10 @@ async function fetchOpenCodeModels(): Promise<Record<string, string[]>> {
         if (!grouped.copilot) grouped.copilot = [];
         grouped.copilot.push(trimmed);
       }
+      if (provider === "google" && trimmed.includes("antigravity")) {
+        if (!grouped.antigravity) grouped.antigravity = [];
+        grouped.antigravity.push(trimmed);
+      }
     }
     // opencode gets ALL its authenticated models
     if (allOpenCodeModels.length > 0) {
@@ -1724,11 +2116,14 @@ async function fetchOpenClawModels(): Promise<Record<string, string[]>> {
       }
     }
   } catch {
-    // openclaw not available; use copilot-routed gemini models as fallback
+    // openclaw not available; use opencode antigravity plugin models as fallback
     grouped.antigravity = [
-      "github-copilot/gemini-2.5-pro",
-      "github-copilot/gemini-3-flash-preview",
-      "github-copilot/gemini-3-pro-preview",
+      "google/antigravity-gemini-3-pro",
+      "google/antigravity-gemini-3-flash",
+      "google/antigravity-claude-sonnet-4-5",
+      "google/antigravity-claude-sonnet-4-5-thinking",
+      "google/antigravity-claude-opus-4-5-thinking",
+      "google/antigravity-claude-opus-4-6-thinking",
     ];
   }
   return grouped;
@@ -2077,6 +2472,11 @@ function prettyStreamJson(raw: string): string {
     }
   }
 
+  // Fallback: if no JSON was parsed, return raw text (e.g. HTTP agent plain-text logs)
+  if (chunks.length === 0 && meta.length === 0) {
+    return raw.trim();
+  }
+
   const stitched = chunks.join("");
   const PARA = "\u0000";
   const withPara = stitched.replace(/\n{2,}/g, PARA);
@@ -2225,6 +2625,27 @@ ${card.description}`;
   appendCardLog(id, "system", `RUN start requested (agent=${agent})`);
   appendSystemLog("system", `Run start ${id} agent=${agent}`);
 
+  // HTTP agents (copilot/antigravity): direct API calls, no CLI dependency.
+  // DB writes happen synchronously before async launch to avoid race conditions.
+  if (agent === "copilot" || agent === "antigravity") {
+    const controller = new AbortController();
+    const fakePid = -(++httpAgentCounter);
+
+    db.prepare(
+      "INSERT INTO card_runs (card_id, created_at, agent, pid, status, log_path, cwd) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ).run(id, nowMs(), agent, fakePid, "running", logPath, projectPath);
+
+    db.prepare(
+      "UPDATE cards SET updated_at = ?, status = ? WHERE id = ?"
+    ).run(nowMs(), "In Progress", id);
+
+    // Fire-and-forget: launchHttpAgent registers in activeProcesses and handles completion
+    launchHttpAgent(id, agent, prompt, projectPath, logPath, controller, fakePid);
+
+    return res.json({ ok: true, pid: fakePid, logPath, cwd: projectPath });
+  }
+
+  // CLI agents (claude, codex, gemini, opencode): spawn child process
   const child = spawnAgent(id, agent, prompt, projectPath, logPath);
 
   child.on("close", (code) => {
@@ -2261,7 +2682,14 @@ app.post("/api/cards/:id/stop", (req, res) => {
     return res.json({ ok: true, stopped: false });
   }
 
-  killPidTree(pid);
+  // HTTP agents have negative fake PIDs; use mock kill() for abort.
+  // Real CLI agents use killPidTree() for process group termination.
+  if (typeof pid === "number" && pid < 0) {
+    // HTTP agent: abort via mock process if still in memory; otherwise already gone
+    activeChild?.kill();
+  } else {
+    killPidTree(pid);
+  }
   activeProcesses.delete(id);
   activeProcesses.delete(`${id}:review`);
 
@@ -2350,7 +2778,14 @@ function deleteCardAndArtifacts(cardId: string) {
   // Kill active processes (in-memory)
   for (const key of [cardId, `${cardId}:review`]) {
     const child = activeProcesses.get(key);
-    if (child?.pid) killPidTree(child.pid);
+    if (child?.pid) {
+      // HTTP agents have negative fake PIDs; use mock kill() for abort
+      if (child.pid < 0) {
+        child.kill();
+      } else {
+        killPidTree(child.pid);
+      }
+    }
     activeProcesses.delete(key);
   }
 
@@ -2358,7 +2793,7 @@ function deleteCardAndArtifacts(cardId: string) {
   const run = db
     .prepare("SELECT * FROM card_runs WHERE card_id = ? ORDER BY created_at DESC LIMIT 1")
     .get(cardId) as any;
-  if (run?.pid) {
+  if (run?.pid && Number(run.pid) > 0) {
     killPidTree(Number(run.pid));
     db.prepare("UPDATE card_runs SET status = ? WHERE id = ?").run("stopped", run.id);
   }
