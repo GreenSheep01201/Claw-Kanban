@@ -3,7 +3,7 @@ import cors from "cors";
 import path from "path";
 import fs from "node:fs";
 import os from "node:os";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash, randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
@@ -42,6 +42,67 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
+// --- OAuth extension (optional) ---
+// v1 goal: allow UI-based OAuth connect and server-side token storage.
+// Security: never store refresh/access tokens in browser localStorage.
+const OAUTH_BASE_URL = process.env.OAUTH_BASE_URL || `http://${HOST}:${PORT}`;
+const OAUTH_ENCRYPTION_SECRET = process.env.OAUTH_ENCRYPTION_SECRET || process.env.SESSION_SECRET || "";
+
+// Built-in OAuth credentials (same as OpenClaw's built-in values)
+const BUILTIN_GITHUB_CLIENT_ID = "Iv1.b507a08c87ecfe98";
+const BUILTIN_GOOGLE_CLIENT_ID = Buffer.from(
+  "MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dG9sb2poNGc0MDNlcC5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbQ==",
+  "base64",
+).toString();
+const BUILTIN_GOOGLE_CLIENT_SECRET = Buffer.from(
+  "R09DU1BYLUs1OEZXUjQ4NkxkTEoxbUxCOHNYQzR6NnFEQWY=",
+  "base64",
+).toString();
+
+function oauthEncryptionKey(): Buffer {
+  // Derive a stable 32-byte key from env secret (minimal v1).
+  if (!OAUTH_ENCRYPTION_SECRET) {
+    throw new Error("Missing OAUTH_ENCRYPTION_SECRET (required to encrypt OAuth tokens at rest)");
+  }
+  return createHash("sha256").update(OAUTH_ENCRYPTION_SECRET, "utf8").digest();
+}
+
+function encryptSecret(plaintext: string): string {
+  const key = oauthEncryptionKey();
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const enc = Buffer.concat([cipher.update(Buffer.from(plaintext, "utf8")), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  // format: v1:<ivb64>:<tagb64>:<ctb64>
+  return ["v1", iv.toString("base64"), tag.toString("base64"), enc.toString("base64")].join(":");
+}
+
+function decryptSecret(payload: string): string {
+  const [ver, ivB64, tagB64, ctB64] = payload.split(":");
+  if (ver !== "v1" || !ivB64 || !tagB64 || !ctB64) throw new Error("invalid_encrypted_payload");
+  const key = oauthEncryptionKey();
+  const iv = Buffer.from(ivB64, "base64");
+  const tag = Buffer.from(tagB64, "base64");
+  const ct = Buffer.from(ctB64, "base64");
+  const decipher = createDecipheriv("aes-256-gcm", key, iv);
+  decipher.setAuthTag(tag);
+  const dec = Buffer.concat([decipher.update(ct), decipher.final()]);
+  return dec.toString("utf8");
+}
+
+function b64url(buf: Buffer): string {
+  return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function pkceVerifier(): string {
+  return b64url(randomBytes(32));
+}
+
+function pkceChallengeS256(verifier: string): string {
+  const hash = createHash("sha256").update(verifier, "utf8").digest();
+  return b64url(hash);
+}
+
 // --- Production static file serving ---
 // In production (no VITE_DEV), serve the built React UI from dist/
 const distDir = path.resolve(__server_dirname, "..", "dist");
@@ -62,6 +123,18 @@ const activeProcesses = new Map<string, ChildProcess>();
 
 // Returns [command, ...args] without the prompt.
 // Prompt is delivered via stdin piping to avoid shell escaping issues on Windows.
+// OAuth provider config stored in settings
+interface OAuthProviderConfig {
+  model: string;
+  via: "opencode" | "openclaw";
+}
+type OAuthProviderConfigMap = Record<string, OAuthProviderConfig>;
+
+function getOAuthProviderConfig(): OAuthProviderConfigMap {
+  const settings = getProviderSettings();
+  return settings.oauthProviderConfig ?? {};
+}
+
 function buildAgentArgs(agent: string): string[] {
   switch (agent) {
     case "codex":
@@ -71,6 +144,19 @@ function buildAgentArgs(agent: string): string[] {
               "--output-format=stream-json", "--include-partial-messages"];
     case "gemini":
       return ["gemini", "--yolo", "--output-format=stream-json"];
+    case "opencode":
+      return ["opencode", "run", "--format", "json"];
+    case "copilot":
+    case "antigravity": {
+      const config = getOAuthProviderConfig()[agent];
+      const model = config?.model || (agent === "copilot" ? "github-copilot/claude-sonnet-4.5" : "gemini-2.5-pro");
+      const via = config?.via || "opencode";
+      if (via === "opencode") {
+        return ["opencode", "run", "--format", "json", "--model", model];
+      }
+      // openclaw route
+      return ["openclaw", "agent", "--message-stdin", "--model", model, "--output-format", "stream-json"];
+    }
     default:
       throw new Error(`unsupported agent: ${agent}`);
   }
@@ -190,6 +276,29 @@ CREATE TABLE IF NOT EXISTS card_runs (
 CREATE INDEX IF NOT EXISTS idx_card_runs_card ON card_runs(card_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_card_logs_card ON card_logs(card_id, created_at DESC);
+
+-- OAuth extension tables (optional)
+CREATE TABLE IF NOT EXISTS oauth_states (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  verifier_enc TEXT NOT NULL,
+  redirect_to TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_oauth_states_provider_created ON oauth_states(provider, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS oauth_credentials (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  email TEXT,
+  access_token_enc TEXT,
+  refresh_token_enc TEXT,
+  expires_at INTEGER,
+  scope TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_credentials_provider ON oauth_credentials(provider);
 `);
 
 // Migration: add project_path column (safe to re-run; silently ignored if column exists)
@@ -368,10 +477,10 @@ function queueWake(params: { key: string; text: string; debounceMs?: number }) {
 }
 
 const CardStatus = z.enum(["Inbox", "Planned", "In Progress", "Review/Test", "Done", "Stopped"]);
-const Assignee = z.enum(["claude", "codex", "gemini"]).optional();
+const Assignee = z.enum(["claude", "codex", "gemini", "opencode", "copilot", "antigravity"]).optional();
 const Role = z.enum(["devops", "backend", "frontend"]).optional();
 const TaskType = z.enum(["new", "modify", "bugfix"]).optional();
-const Provider = z.enum(["claude", "codex", "gemini"]);
+const Provider = z.enum(["claude", "codex", "gemini", "opencode", "copilot", "antigravity"]);
 
 // Default provider settings
 const DEFAULT_PROVIDER_SETTINGS = {
@@ -389,6 +498,7 @@ const DEFAULT_PROVIDER_SETTINGS = {
     reviewTest: null,
   },
   autoAssign: true,
+  oauthProviderConfig: {} as OAuthProviderConfigMap,
 };
 
 // Initialize default settings if not exists
@@ -521,6 +631,10 @@ app.get("/api/settings", (_req, res) => {
 });
 
 app.put("/api/settings", (req, res) => {
+  const OAuthProviderConfigSchema = z.object({
+    model: z.string(),
+    via: z.enum(["opencode", "openclaw"]),
+  });
   const settingsSchema = z.object({
     roleProviders: z.object({
       devops: Provider,
@@ -536,6 +650,7 @@ app.put("/api/settings", (req, res) => {
       reviewTest: Provider.nullable(),
     }),
     autoAssign: z.boolean(),
+    oauthProviderConfig: z.record(z.string(), OAuthProviderConfigSchema).optional(),
   });
 
   const settings = settingsSchema.parse(req.body);
@@ -548,6 +663,862 @@ app.put("/api/settings", (req, res) => {
 
   appendSystemLog("system", "Settings updated");
   res.json({ ok: true });
+});
+
+// --- OAuth Connect ---
+// Keep CLI provider flow unchanged; OAuth is a separate server-side credential flow.
+// Security: tokens are encrypted at rest in sqlite; browser only receives status metadata.
+
+type OAuthCredentialProvider = "github" | "copilot_pat" | "google_antigravity";
+type OAuthConnectProvider = "github-copilot" | "antigravity";
+
+const OAuthCredentialProviderSchema = z.enum(["github", "copilot_pat", "google_antigravity"]);
+const OAuthConnectProviderSchema = z.enum(["github-copilot", "antigravity"]);
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+
+type OAuthStateRow = {
+  id: string;
+  provider: OAuthCredentialProvider;
+  created_at: number;
+  verifier_enc: string;
+  redirect_to: string | null;
+};
+
+type OAuthCredentialRow = {
+  provider: OAuthCredentialProvider;
+  email: string | null;
+  created_at: number;
+  updated_at: number;
+  expires_at: number | null;
+  scope: string | null;
+  refresh_token_enc: string | null;
+};
+
+function requireOAuthStorageReady() {
+  if (!OAUTH_ENCRYPTION_SECRET) {
+    throw new Error("missing_OAUTH_ENCRYPTION_SECRET");
+  }
+}
+
+function cleanupOAuthStates() {
+  db.prepare("DELETE FROM oauth_states WHERE created_at < ?").run(nowMs() - OAUTH_STATE_TTL_MS);
+}
+
+function sanitizeOAuthRedirect(raw: unknown): string {
+  if (typeof raw !== "string") return "/";
+  const input = raw.trim();
+  if (!input) return "/";
+
+  if (input.startsWith("/") && !input.startsWith("//")) return input;
+
+  try {
+    const u = new URL(input);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "/";
+
+    const allowedHosts = new Set(["127.0.0.1", "localhost", "0.0.0.0", HOST]);
+    const envHosts = (process.env.OAUTH_ALLOWED_REDIRECT_HOSTS ?? "")
+      .split(",")
+      .map((h) => h.trim())
+      .filter(Boolean);
+    for (const h of envHosts) allowedHosts.add(h);
+    if (u.hostname.startsWith("127.")) return u.toString();
+    if (!allowedHosts.has(u.hostname)) return "/";
+    return u.toString();
+  } catch {
+    return "/";
+  }
+}
+
+function appendOAuthQuery(redirectTo: string, key: string, value: string): string {
+  const isRelative = redirectTo.startsWith("/");
+  const target = new URL(redirectTo, OAUTH_BASE_URL);
+  target.searchParams.set(key, value);
+  if (isRelative) {
+    return `${target.pathname}${target.search}${target.hash}`;
+  }
+  return target.toString();
+}
+
+function consumeOAuthState(stateId: string, provider: OAuthCredentialProvider): OAuthStateRow | null {
+  const row = db
+    .prepare("SELECT * FROM oauth_states WHERE id = ? AND provider = ?")
+    .get(stateId, provider) as OAuthStateRow | undefined;
+  if (!row) return null;
+
+  db.prepare("DELETE FROM oauth_states WHERE id = ?").run(stateId);
+  if (nowMs() - row.created_at > OAUTH_STATE_TTL_MS) return null;
+  return row;
+}
+
+function upsertOAuthCredential(input: {
+  provider: OAuthCredentialProvider;
+  email?: string | null;
+  accessToken?: string | null;
+  refreshToken?: string | null;
+  expiresAt?: number | null;
+  scope?: string | null;
+}) {
+  requireOAuthStorageReady();
+  const t = nowMs();
+  const existing = db.prepare("SELECT id, created_at FROM oauth_credentials WHERE provider = ?").get(input.provider) as
+    | { id: string; created_at: number }
+    | undefined;
+  const id = existing?.id ?? randomUUID();
+  db.prepare(
+    `INSERT INTO oauth_credentials (id, provider, created_at, updated_at, email, access_token_enc, refresh_token_enc, expires_at, scope)
+     VALUES (@id, @provider, @created_at, @updated_at, @email, @access_token_enc, @refresh_token_enc, @expires_at, @scope)
+     ON CONFLICT(provider) DO UPDATE SET
+       updated_at=excluded.updated_at,
+       email=excluded.email,
+       access_token_enc=excluded.access_token_enc,
+       refresh_token_enc=excluded.refresh_token_enc,
+       expires_at=excluded.expires_at,
+       scope=excluded.scope
+    `
+  ).run({
+    id,
+    provider: input.provider,
+    created_at: existing?.created_at ?? t,
+    updated_at: t,
+    email: input.email ?? null,
+    access_token_enc: input.accessToken ? encryptSecret(input.accessToken) : null,
+    refresh_token_enc: input.refreshToken ? encryptSecret(input.refreshToken) : null,
+    expires_at: input.expiresAt ?? null,
+    scope: input.scope ?? null,
+  });
+}
+
+function deleteOAuthCredential(provider: OAuthCredentialProvider) {
+  db.prepare("DELETE FROM oauth_credentials WHERE provider = ?").run(provider);
+}
+
+function startGitHubOAuth(redirectTo: string, callbackPath: string): string {
+  requireOAuthStorageReady();
+  const clientId = process.env.OAUTH_GITHUB_CLIENT_ID ?? BUILTIN_GITHUB_CLIENT_ID;
+  if (!clientId) throw new Error("missing_OAUTH_GITHUB_CLIENT_ID");
+
+  cleanupOAuthStates();
+  const stateId = randomUUID();
+  db.prepare(
+    "INSERT INTO oauth_states (id, provider, created_at, verifier_enc, redirect_to) VALUES (?, ?, ?, ?, ?)"
+  ).run(stateId, "github", nowMs(), "none", redirectTo);
+
+  const url = new URL("https://github.com/login/oauth/authorize");
+  url.searchParams.set("client_id", clientId);
+  url.searchParams.set("redirect_uri", `${OAUTH_BASE_URL}${callbackPath}`);
+  url.searchParams.set("state", stateId);
+  url.searchParams.set("scope", "read:user user:email");
+  return url.toString();
+}
+
+function startGoogleAntigravityOAuth(redirectTo: string, callbackPath: string): string {
+  requireOAuthStorageReady();
+  const clientId = process.env.OAUTH_GOOGLE_CLIENT_ID ?? BUILTIN_GOOGLE_CLIENT_ID;
+  if (!clientId) throw new Error("missing_OAUTH_GOOGLE_CLIENT_ID");
+
+  cleanupOAuthStates();
+  const verifier = pkceVerifier();
+  const challenge = pkceChallengeS256(verifier);
+  const stateId = randomUUID();
+
+  db.prepare(
+    "INSERT INTO oauth_states (id, provider, created_at, verifier_enc, redirect_to) VALUES (?, ?, ?, ?, ?)"
+  ).run(stateId, "google_antigravity", nowMs(), encryptSecret(verifier), redirectTo);
+
+  const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  url.searchParams.set("client_id", clientId);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("redirect_uri", `${OAUTH_BASE_URL}${callbackPath}`);
+  url.searchParams.set("scope", [
+    "https://www.googleapis.com/auth/cloud-platform",
+    "openid",
+    "email",
+    "profile",
+  ].join(" "));
+  url.searchParams.set("code_challenge", challenge);
+  url.searchParams.set("code_challenge_method", "S256");
+  url.searchParams.set("state", stateId);
+  url.searchParams.set("access_type", "offline");
+  url.searchParams.set("prompt", "consent");
+  return url.toString();
+}
+
+function getOAuthCredential(provider: OAuthCredentialProvider): OAuthCredentialRow | null {
+  const row = db
+    .prepare("SELECT provider, email, created_at, updated_at, expires_at, scope, refresh_token_enc FROM oauth_credentials WHERE provider = ?")
+    .get(provider) as OAuthCredentialRow | undefined;
+  return row ?? null;
+}
+
+function buildOAuthStatus() {
+  const github = getOAuthCredential("github");
+  const copilotPat = getOAuthCredential("copilot_pat");
+  const antigravity = getOAuthCredential("google_antigravity");
+
+  const githubSource = github ? "github" : copilotPat ? "copilot_pat" : null;
+  const githubRow = github ?? copilotPat;
+
+  return {
+    "github-copilot": {
+      provider: "github-copilot" as const,
+      connected: Boolean(githubRow),
+      source: githubSource,
+      email: githubRow?.email ?? null,
+      createdAt: githubRow?.created_at ?? null,
+      updatedAt: githubRow?.updated_at ?? null,
+      expiresAt: githubRow?.expires_at ?? null,
+      scope: githubRow?.scope ?? null,
+      hasRefreshToken: Boolean(githubRow?.refresh_token_enc),
+    },
+    antigravity: {
+      provider: "antigravity" as const,
+      connected: Boolean(antigravity),
+      source: antigravity ? "google_antigravity" : null,
+      email: antigravity?.email ?? null,
+      createdAt: antigravity?.created_at ?? null,
+      updatedAt: antigravity?.updated_at ?? null,
+      expiresAt: antigravity?.expires_at ?? null,
+      scope: antigravity?.scope ?? null,
+      hasRefreshToken: Boolean(antigravity?.refresh_token_enc),
+    },
+  };
+}
+
+function buildOAuthStartUrl(provider: OAuthConnectProvider, redirectTo: string, callbackMode: "generic" | "legacy"): string {
+  if (provider === "github-copilot") {
+    const callbackPath = callbackMode === "legacy" ? "/api/oauth/github/callback" : "/api/oauth/callback/github-copilot";
+    return startGitHubOAuth(redirectTo, callbackPath);
+  }
+  const callbackPath = callbackMode === "legacy" ? "/api/oauth/google-antigravity/callback" : "/api/oauth/callback/antigravity";
+  return startGoogleAntigravityOAuth(redirectTo, callbackPath);
+}
+
+app.get("/api/oauth/status", (_req, res) => {
+  cleanupOAuthStates();
+  res.json({
+    storageReady: Boolean(OAUTH_ENCRYPTION_SECRET),
+    providers: buildOAuthStatus(),
+  });
+});
+
+app.get("/api/oauth/connections", (_req, res) => {
+  const rows = db
+    .prepare("SELECT provider, email, created_at, updated_at, expires_at, scope FROM oauth_credentials")
+    .all() as Array<{ provider: string; email: string | null; created_at: number; updated_at: number; expires_at: number | null; scope: string | null }>;
+  const out = rows.map((r) => ({
+    provider: r.provider,
+    email: r.email,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    expiresAt: r.expires_at,
+    scope: r.scope,
+  }));
+  res.json({ connections: out });
+});
+
+app.post("/api/oauth/disconnect", (req, res) => {
+  const schema = z.object({ provider: OAuthConnectProviderSchema });
+  const { provider } = schema.parse(req.body ?? {});
+
+  if (provider === "github-copilot") {
+    deleteOAuthCredential("github");
+    deleteOAuthCredential("copilot_pat");
+  } else {
+    deleteOAuthCredential("google_antigravity");
+  }
+
+  appendSystemLog("system", `OAuth disconnected: ${provider}`);
+  res.json({ ok: true });
+});
+
+app.delete("/api/oauth/:provider", (req, res) => {
+  const parsed = OAuthCredentialProviderSchema.safeParse(String(req.params.provider));
+  if (!parsed.success) {
+    return res.status(400).json({ error: "invalid_provider" });
+  }
+  deleteOAuthCredential(parsed.data);
+  appendSystemLog("system", `OAuth disconnected: ${parsed.data}`);
+  res.json({ ok: true });
+});
+
+app.get("/api/oauth/start", (req, res) => {
+  const providerRaw = firstQueryValue(req.query.provider);
+  const parsed = OAuthConnectProviderSchema.safeParse(providerRaw);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "invalid_provider" });
+  }
+
+  const redirectTo = sanitizeOAuthRedirect(firstQueryValue(req.query.redirect_to) ?? "/");
+  try {
+    const authUrl = buildOAuthStartUrl(parsed.data, redirectTo, "generic");
+    res.redirect(302, authUrl);
+  } catch (err) {
+    res.status(500).json({ error: "oauth_start_failed", message: String(err) });
+  }
+});
+
+app.get("/api/oauth/github/start", (req, res) => {
+  const redirectTo = sanitizeOAuthRedirect(firstQueryValue(req.query.redirect_to) ?? "/");
+  try {
+    const authUrl = buildOAuthStartUrl("github-copilot", redirectTo, "legacy");
+    res.redirect(302, authUrl);
+  } catch (err) {
+    res.status(500).json({ error: "oauth_start_failed", message: String(err) });
+  }
+});
+
+app.get("/api/oauth/github-copilot/start", (req, res) => {
+  const redirectTo = sanitizeOAuthRedirect(firstQueryValue(req.query.redirect_to) ?? "/");
+  try {
+    const authUrl = startGitHubOAuth(redirectTo, "/api/oauth/github-copilot/callback");
+    res.redirect(302, authUrl);
+  } catch (err) {
+    res.status(500).json({ error: "oauth_start_failed", message: String(err) });
+  }
+});
+
+app.get("/api/oauth/google-antigravity/start", (req, res) => {
+  const redirectTo = sanitizeOAuthRedirect(firstQueryValue(req.query.redirect_to) ?? "/");
+  try {
+    const authUrl = buildOAuthStartUrl("antigravity", redirectTo, "legacy");
+    res.redirect(302, authUrl);
+  } catch (err) {
+    res.status(500).json({ error: "oauth_start_failed", message: String(err) });
+  }
+});
+
+app.get("/api/oauth/antigravity/start", (req, res) => {
+  const redirectTo = sanitizeOAuthRedirect(firstQueryValue(req.query.redirect_to) ?? "/");
+  try {
+    const authUrl = startGoogleAntigravityOAuth(redirectTo, "/api/oauth/antigravity/callback");
+    res.redirect(302, authUrl);
+  } catch (err) {
+    res.status(500).json({ error: "oauth_start_failed", message: String(err) });
+  }
+});
+
+// Manual Copilot PAT entry (optional alternative to GitHub OAuth).
+app.post("/api/oauth/copilot/pat", (req, res) => {
+  const schema = z.object({ token: z.string().min(10) });
+  const { token } = schema.parse(req.body ?? {});
+  upsertOAuthCredential({ provider: "copilot_pat", accessToken: token });
+  appendSystemLog("system", "Copilot PAT stored (encrypted)");
+  res.json({ ok: true });
+});
+
+// --- GitHub Device Code Flow (same as OpenClaw) ---
+const GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code";
+const GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token";
+
+app.post("/api/oauth/github-copilot/device-start", async (_req, res) => {
+  try {
+    requireOAuthStorageReady();
+  } catch {
+    return res.status(400).json({ error: "missing_OAUTH_ENCRYPTION_SECRET" });
+  }
+
+  const clientId = process.env.OAUTH_GITHUB_CLIENT_ID ?? BUILTIN_GITHUB_CLIENT_ID;
+  try {
+    const resp = await fetch(GITHUB_DEVICE_CODE_URL, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ client_id: clientId, scope: "read:user" }),
+    });
+
+    if (!resp.ok) {
+      return res.status(502).json({ error: "github_device_code_failed", status: resp.status });
+    }
+
+    const json = (await resp.json()) as {
+      device_code: string;
+      user_code: string;
+      verification_uri: string;
+      expires_in: number;
+      interval: number;
+    };
+
+    if (!json.device_code || !json.user_code) {
+      return res.status(502).json({ error: "github_device_code_invalid" });
+    }
+
+    // Encrypt and store device_code server-side so the browser never sees it
+    const stateId = randomUUID();
+    cleanupOAuthStates();
+    db.prepare(
+      "INSERT INTO oauth_states (id, provider, created_at, verifier_enc, redirect_to) VALUES (?, ?, ?, ?, ?)",
+    ).run(stateId, "github", nowMs(), encryptSecret(json.device_code), null);
+
+    res.json({
+      stateId,
+      userCode: json.user_code,
+      verificationUri: json.verification_uri,
+      expiresIn: json.expires_in,
+      interval: json.interval,
+    });
+  } catch (err) {
+    res.status(500).json({ error: "github_device_start_failed", message: String(err) });
+  }
+});
+
+app.post("/api/oauth/github-copilot/device-poll", async (req, res) => {
+  const schema = z.object({ stateId: z.string().uuid() });
+  const { stateId } = schema.parse(req.body ?? {});
+
+  const row = db
+    .prepare("SELECT * FROM oauth_states WHERE id = ? AND provider = ?")
+    .get(stateId, "github") as OAuthStateRow | undefined;
+  if (!row) {
+    return res.status(400).json({ error: "invalid_state", status: "expired" });
+  }
+  if (nowMs() - row.created_at > OAUTH_STATE_TTL_MS) {
+    db.prepare("DELETE FROM oauth_states WHERE id = ?").run(stateId);
+    return res.json({ status: "expired" });
+  }
+
+  let deviceCode: string;
+  try {
+    deviceCode = decryptSecret(row.verifier_enc);
+  } catch {
+    return res.status(500).json({ error: "decrypt_failed" });
+  }
+
+  const clientId = process.env.OAUTH_GITHUB_CLIENT_ID ?? BUILTIN_GITHUB_CLIENT_ID;
+  try {
+    const resp = await fetch(GITHUB_ACCESS_TOKEN_URL, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        client_id: clientId,
+        device_code: deviceCode,
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+      }),
+    });
+
+    if (!resp.ok) {
+      return res.status(502).json({ error: "github_poll_failed", status: "error" });
+    }
+
+    const json = (await resp.json()) as Record<string, unknown>;
+
+    if ("access_token" in json && typeof json.access_token === "string") {
+      // Success — store token and clean up state
+      db.prepare("DELETE FROM oauth_states WHERE id = ?").run(stateId);
+      const accessToken = json.access_token;
+
+      // Fetch user email
+      let email: string | null = null;
+      try {
+        const emailsResp = await fetch("https://api.github.com/user/emails", {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "User-Agent": "claw-kanban",
+            Accept: "application/vnd.github+json",
+          },
+        });
+        if (emailsResp.ok) {
+          const emails = (await emailsResp.json()) as Array<{ email: string; primary: boolean; verified: boolean }>;
+          const primary = emails.find((e) => e.primary && e.verified);
+          if (primary) email = primary.email;
+        }
+      } catch {
+        // email fetch is best-effort
+      }
+
+      upsertOAuthCredential({
+        provider: "github",
+        email,
+        accessToken,
+        scope: typeof json.scope === "string" ? json.scope : null,
+      });
+      appendSystemLog("system", "GitHub/Copilot connected via device code flow");
+
+      return res.json({ status: "complete", email });
+    }
+
+    const error = typeof json.error === "string" ? json.error : "unknown";
+    if (error === "authorization_pending") {
+      return res.json({ status: "pending" });
+    }
+    if (error === "slow_down") {
+      return res.json({ status: "slow_down" });
+    }
+    if (error === "expired_token") {
+      db.prepare("DELETE FROM oauth_states WHERE id = ?").run(stateId);
+      return res.json({ status: "expired" });
+    }
+    if (error === "access_denied") {
+      db.prepare("DELETE FROM oauth_states WHERE id = ?").run(stateId);
+      return res.json({ status: "denied" });
+    }
+
+    return res.json({ status: "error", error });
+  } catch (err) {
+    return res.status(500).json({ error: "github_poll_error", message: String(err) });
+  }
+});
+
+async function handleGitHubCallback(req: express.Request, res: express.Response, callbackPath: string) {
+  const code = typeof req.query.code === "string" ? req.query.code : "";
+  const state = typeof req.query.state === "string" ? req.query.state : "";
+  if (!code || !state) return res.status(400).send("Missing code/state");
+
+  const row = consumeOAuthState(state, "github");
+  if (!row) return res.status(400).send("Invalid or expired state");
+
+  const redirectTo = sanitizeOAuthRedirect(row.redirect_to ?? "/");
+  const clientId = process.env.OAUTH_GITHUB_CLIENT_ID ?? BUILTIN_GITHUB_CLIENT_ID;
+  const clientSecret = process.env.OAUTH_GITHUB_CLIENT_SECRET;
+  if (!clientId) {
+    const fail = appendOAuthQuery(redirectTo, "oauth_error", "github_env_missing");
+    return res.redirect(302, fail);
+  }
+
+  try {
+    const tokenBody: Record<string, string> = {
+      client_id: clientId,
+      code,
+      redirect_uri: `${OAUTH_BASE_URL}${callbackPath}`,
+    };
+    if (clientSecret) tokenBody.client_secret = clientSecret;
+    const tokenResp = await fetch("https://github.com/login/oauth/access_token", {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(tokenBody),
+    });
+    const tokenJson = await tokenResp.json() as any;
+    if (!tokenResp.ok || !tokenJson.access_token) {
+      const fail = appendOAuthQuery(redirectTo, "oauth_error", "github_exchange_failed");
+      return res.redirect(302, fail);
+    }
+
+    const accessToken = String(tokenJson.access_token);
+
+    const emailsResp = await fetch("https://api.github.com/user/emails", {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "User-Agent": "claw-kanban",
+        Accept: "application/vnd.github+json",
+      },
+    });
+    const emails = emailsResp.ok ? (await emailsResp.json() as any[]) : [];
+    const primary = Array.isArray(emails) ? emails.find((e) => e?.primary) : null;
+    const email = primary?.verified ? String(primary.email) : null;
+
+    upsertOAuthCredential({ provider: "github", email, accessToken, scope: tokenJson.scope ?? null });
+    appendSystemLog("system", "GitHub/Copilot OAuth connected");
+
+    const ok = appendOAuthQuery(redirectTo, "oauth", "github_connected");
+    return res.redirect(302, ok);
+  } catch {
+    const fail = appendOAuthQuery(redirectTo, "oauth_error", "github_callback_failed");
+    return res.redirect(302, fail);
+  }
+}
+
+async function handleGoogleAntigravityCallback(req: express.Request, res: express.Response, callbackPath: string) {
+  const code = typeof req.query.code === "string" ? req.query.code : "";
+  const state = typeof req.query.state === "string" ? req.query.state : "";
+  if (!code || !state) return res.status(400).send("Missing code/state");
+
+  const row = consumeOAuthState(state, "google_antigravity");
+  if (!row) return res.status(400).send("Invalid or expired state");
+
+  const redirectTo = sanitizeOAuthRedirect(row.redirect_to ?? "/");
+  const clientId = process.env.OAUTH_GOOGLE_CLIENT_ID ?? BUILTIN_GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.OAUTH_GOOGLE_CLIENT_SECRET ?? BUILTIN_GOOGLE_CLIENT_SECRET;
+  if (!clientId || !clientSecret) {
+    const fail = appendOAuthQuery(redirectTo, "oauth_error", "google_env_missing");
+    return res.redirect(302, fail);
+  }
+
+  let verifier = "";
+  try {
+    verifier = decryptSecret(String(row.verifier_enc));
+  } catch {
+    const fail = appendOAuthQuery(redirectTo, "oauth_error", "google_verifier_invalid");
+    return res.redirect(302, fail);
+  }
+
+  try {
+    const tokenResp = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        code,
+        grant_type: "authorization_code",
+        redirect_uri: `${OAUTH_BASE_URL}${callbackPath}`,
+        code_verifier: verifier,
+      }),
+    });
+
+    const tokenJson = await tokenResp.json() as any;
+    if (!tokenResp.ok || !tokenJson.access_token) {
+      const fail = appendOAuthQuery(redirectTo, "oauth_error", "google_exchange_failed");
+      return res.redirect(302, fail);
+    }
+
+    const accessToken = String(tokenJson.access_token);
+    const refreshToken = tokenJson.refresh_token ? String(tokenJson.refresh_token) : null;
+    const expiresIn = typeof tokenJson.expires_in === "number" ? tokenJson.expires_in : 3600;
+    const expiresAt = Date.now() + expiresIn * 1000;
+
+    let email: string | null = null;
+    const userinfoResp = await fetch("https://www.googleapis.com/oauth2/v1/userinfo?alt=json", {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (userinfoResp.ok) {
+      const ui = await userinfoResp.json() as any;
+      if (ui?.email) email = String(ui.email);
+    }
+
+    upsertOAuthCredential({
+      provider: "google_antigravity",
+      email,
+      accessToken,
+      refreshToken,
+      expiresAt,
+      scope: tokenJson.scope ?? null,
+    });
+    appendSystemLog("system", "Google Antigravity OAuth connected");
+
+    const ok = appendOAuthQuery(redirectTo, "oauth", "antigravity_connected");
+    return res.redirect(302, ok);
+  } catch {
+    const fail = appendOAuthQuery(redirectTo, "oauth_error", "google_callback_failed");
+    return res.redirect(302, fail);
+  }
+}
+
+app.get("/api/oauth/callback/:provider", async (req, res) => {
+  const provider = String(req.params.provider);
+  if (provider === "github-copilot") {
+    return handleGitHubCallback(req, res, "/api/oauth/callback/github-copilot");
+  }
+  if (provider === "antigravity") {
+    return handleGoogleAntigravityCallback(req, res, "/api/oauth/callback/antigravity");
+  }
+  return res.status(400).send("Invalid provider");
+});
+
+app.get("/api/oauth/github/callback", async (req, res) => {
+  return handleGitHubCallback(req, res, "/api/oauth/github/callback");
+});
+
+app.get("/api/oauth/github-copilot/callback", async (req, res) => {
+  return handleGitHubCallback(req, res, "/api/oauth/github-copilot/callback");
+});
+
+app.get("/api/oauth/google-antigravity/callback", async (req, res) => {
+  return handleGoogleAntigravityCallback(req, res, "/api/oauth/google-antigravity/callback");
+});
+
+app.get("/api/oauth/antigravity/callback", async (req, res) => {
+  return handleGoogleAntigravityCallback(req, res, "/api/oauth/antigravity/callback");
+});
+
+// --- OpenClaw Auth-Profiles Import ---
+
+type OpenClawProfileType = "oauth" | "token";
+
+interface OpenClawOAuthProfile {
+  type: "oauth";
+  provider: string;
+  access: string;
+  refresh?: string;
+  expires?: number;
+  email?: string;
+  accountId?: string;
+  projectId?: string;
+}
+
+interface OpenClawTokenProfile {
+  type: "token";
+  provider: string;
+  token: string;
+}
+
+type OpenClawProfile = OpenClawOAuthProfile | OpenClawTokenProfile;
+
+interface OpenClawAuthProfiles {
+  version: number;
+  profiles: Record<string, OpenClawProfile>;
+  lastGood?: Record<string, string>;
+}
+
+function resolveAuthProfilesPath(): string | null {
+  if (!OPENCLAW_CONFIG_PATH) return null;
+  try {
+    const configDir = path.dirname(OPENCLAW_CONFIG_PATH);
+    const candidate = path.join(configDir, "agents", "main", "agent", "auth-profiles.json");
+    if (fs.existsSync(candidate)) return candidate;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+type KanbanOAuthProvider = "google_antigravity" | "github";
+
+interface ImportableProfile {
+  profileKey: string;
+  openclawProvider: string;
+  kanbanProvider: KanbanOAuthProvider;
+  label: string;
+  email: string | null;
+  expiresAt: number | null;
+  hasRefreshToken: boolean;
+  expired: boolean;
+}
+
+function readOpenClawProfiles(): ImportableProfile[] {
+  const filePath = resolveAuthProfilesPath();
+  if (!filePath) return [];
+
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const data = JSON.parse(raw) as OpenClawAuthProfiles;
+    if (!data?.profiles || typeof data.profiles !== "object") return [];
+
+    const results: ImportableProfile[] = [];
+
+    for (const [key, profile] of Object.entries(data.profiles)) {
+      if (!profile?.provider) continue;
+
+      if (profile.provider === "google-antigravity") {
+        const p = profile as OpenClawOAuthProfile;
+        results.push({
+          profileKey: key,
+          openclawProvider: "google-antigravity",
+          kanbanProvider: "google_antigravity",
+          label: "Google Antigravity",
+          email: p.email ?? null,
+          expiresAt: p.expires ?? null,
+          hasRefreshToken: Boolean(p.refresh),
+          expired: p.expires ? p.expires < Date.now() : false,
+        });
+      } else if (profile.provider === "github-copilot") {
+        const isToken = profile.type === "token";
+        results.push({
+          profileKey: key,
+          openclawProvider: "github-copilot",
+          kanbanProvider: "github",
+          label: "GitHub Copilot",
+          email: null,
+          expiresAt: isToken ? null : (profile as OpenClawOAuthProfile).expires ?? null,
+          hasRefreshToken: isToken ? false : Boolean((profile as OpenClawOAuthProfile).refresh),
+          expired: false,
+        });
+      }
+    }
+
+    return results;
+  } catch {
+    return [];
+  }
+}
+
+function readOpenClawProfileToken(profileKey: string): { accessToken: string; refreshToken?: string } | null {
+  const filePath = resolveAuthProfilesPath();
+  if (!filePath) return null;
+
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const data = JSON.parse(raw) as OpenClawAuthProfiles;
+    const profile = data?.profiles?.[profileKey];
+    if (!profile) return null;
+
+    if (profile.type === "token") {
+      return { accessToken: (profile as OpenClawTokenProfile).token };
+    }
+    if (profile.type === "oauth") {
+      const p = profile as OpenClawOAuthProfile;
+      return { accessToken: p.access, refreshToken: p.refresh };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+app.get("/api/oauth/openclaw/profiles", (_req, res) => {
+  const profiles = readOpenClawProfiles();
+  const authProfilesPath = resolveAuthProfilesPath();
+  res.json({
+    available: profiles.length > 0,
+    authProfilesPath,
+    profiles,
+  });
+});
+
+app.post("/api/oauth/openclaw/import", (req, res) => {
+  const schema = z.object({
+    providers: z.array(z.enum(["google_antigravity", "github"])).optional(),
+    overwrite: z.boolean().optional().default(false),
+  });
+
+  const { providers: requestedProviders, overwrite } = schema.parse(req.body ?? {});
+
+  try {
+    requireOAuthStorageReady();
+  } catch {
+    return res.status(400).json({ error: "missing_OAUTH_ENCRYPTION_SECRET" });
+  }
+
+  const profiles = readOpenClawProfiles();
+  if (profiles.length === 0) {
+    return res.json({ ok: true, imported: [], skipped: [], errors: [] });
+  }
+
+  const toImport = requestedProviders
+    ? profiles.filter((p) => requestedProviders.includes(p.kanbanProvider))
+    : profiles;
+
+  const imported: string[] = [];
+  const skipped: string[] = [];
+  const errors: Array<{ provider: string; error: string }> = [];
+
+  for (const profile of toImport) {
+    try {
+      // Check if already connected (skip unless overwrite)
+      if (!overwrite) {
+        const existing = getOAuthCredential(profile.kanbanProvider as OAuthCredentialProvider);
+        if (existing) {
+          skipped.push(profile.kanbanProvider);
+          continue;
+        }
+      }
+
+      const tokens = readOpenClawProfileToken(profile.profileKey);
+      if (!tokens) {
+        errors.push({ provider: profile.kanbanProvider, error: "token_read_failed" });
+        continue;
+      }
+
+      upsertOAuthCredential({
+        provider: profile.kanbanProvider as OAuthCredentialProvider,
+        email: profile.email,
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken ?? null,
+        expiresAt: profile.expiresAt,
+        scope: null,
+      });
+
+      imported.push(profile.kanbanProvider);
+      appendSystemLog("system", `OpenClaw import: ${profile.kanbanProvider} (${profile.profileKey})`);
+    } catch (err) {
+      errors.push({ provider: profile.kanbanProvider, error: String(err) });
+    }
+  }
+
+  res.json({ ok: true, imported, skipped, errors });
 });
 
 // --- CLI Provider Status Detection ---
@@ -624,6 +1595,23 @@ const CLI_TOOLS: CliToolDef[] = [
       return false;
     },
   },
+  {
+    name: "opencode",
+    authHint: "Run: opencode auth",
+    checkAuth: () => {
+      const home = os.homedir();
+      // opencode stores auth in ~/.local/share/opencode/auth.json
+      if (fileExistsNonEmpty(path.join(home, ".local", "share", "opencode", "auth.json"))) return true;
+      // XDG_DATA_HOME fallback
+      const xdgData = process.env.XDG_DATA_HOME;
+      if (xdgData && fileExistsNonEmpty(path.join(xdgData, "opencode", "auth.json"))) return true;
+      // macOS: ~/Library/Application Support/opencode/auth.json
+      if (process.platform === "darwin") {
+        if (fileExistsNonEmpty(path.join(home, "Library", "Application Support", "opencode", "auth.json"))) return true;
+      }
+      return false;
+    },
+  },
 ];
 
 function execWithTimeout(cmd: string, args: string[], timeoutMs: number): Promise<string> {
@@ -685,6 +1673,88 @@ app.get("/api/cli-status", async (_req, res) => {
     res.json({ providers: data });
   } catch (err) {
     res.status(500).json({ error: "cli_detection_failed", message: String(err) });
+  }
+});
+
+// --- OAuth Provider Model Listing ---
+let cachedModels: { data: Record<string, string[]>; loadedAt: number } | null = null;
+const MODELS_CACHE_TTL = 60_000;
+
+async function fetchOpenCodeModels(): Promise<Record<string, string[]>> {
+  const grouped: Record<string, string[]> = {};
+  try {
+    const output = await execWithTimeout("opencode", ["models"], 10_000);
+    for (const line of output.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.includes("/")) continue;
+      const slashIdx = trimmed.indexOf("/");
+      const provider = trimmed.slice(0, slashIdx);
+      const model = trimmed.slice(slashIdx + 1);
+      // Only include OAuth-relevant providers
+      if (provider === "github-copilot" || provider === "openai" || provider === "opencode") {
+        const key = provider === "github-copilot" ? "copilot" : provider;
+        if (!grouped[key]) grouped[key] = [];
+        grouped[key].push(trimmed);
+      }
+    }
+  } catch {
+    // opencode not available or failed
+  }
+  return grouped;
+}
+
+async function fetchOpenClawModels(): Promise<Record<string, string[]>> {
+  const grouped: Record<string, string[]> = {};
+  try {
+    const output = await execWithTimeout("openclaw", ["models", "list", "--json"], 10_000);
+    const parsed = JSON.parse(output);
+    if (Array.isArray(parsed)) {
+      for (const m of parsed) {
+        const id = typeof m === "string" ? m : m?.id;
+        if (!id) continue;
+        if (id.includes("antigravity") || id.includes("google-antigravity")) {
+          if (!grouped.antigravity) grouped.antigravity = [];
+          grouped.antigravity.push(id);
+        }
+      }
+    }
+  } catch {
+    // openclaw not available or failed; add well-known antigravity models
+    grouped.antigravity = [
+      "google-antigravity/gemini-2.5-pro",
+      "google-antigravity/gemini-2.5-flash",
+      "google-antigravity/claude-sonnet-4-5",
+      "google-antigravity/claude-opus-4-5",
+    ];
+  }
+  return grouped;
+}
+
+app.get("/api/oauth/models", async (_req, res) => {
+  const now = Date.now();
+  if (cachedModels && now - cachedModels.loadedAt < MODELS_CACHE_TTL) {
+    return res.json({ models: cachedModels.data });
+  }
+
+  try {
+    const [ocModels, clawModels] = await Promise.all([
+      fetchOpenCodeModels(),
+      fetchOpenClawModels(),
+    ]);
+
+    // Merge results
+    const merged: Record<string, string[]> = { ...ocModels };
+    for (const [key, models] of Object.entries(clawModels)) {
+      if (!merged[key]) merged[key] = [];
+      for (const m of models) {
+        if (!merged[key].includes(m)) merged[key].push(m);
+      }
+    }
+
+    cachedModels = { data: merged, loadedAt: Date.now() };
+    res.json({ models: merged });
+  } catch (err) {
+    res.status(500).json({ error: "model_fetch_failed", message: String(err) });
   }
 });
 
@@ -1129,7 +2199,7 @@ app.post("/api/cards/:id/run", (req, res) => {
   if (!card) return res.status(404).json({ error: "not_found" });
 
   const agent = (card.assignee || "claude") as string;
-  if (!["claude", "codex", "gemini"].includes(agent)) {
+  if (!["claude", "codex", "gemini", "opencode", "copilot", "antigravity"].includes(agent)) {
     return res.status(400).json({ error: "unsupported_agent", agent });
   }
 

@@ -1,8 +1,15 @@
 export type CardStatus = "Inbox" | "Planned" | "In Progress" | "Review/Test" | "Done" | "Stopped";
-export type Assignee = "claude" | "codex" | "gemini" | null;
+export type Assignee = "claude" | "codex" | "gemini" | "opencode" | "copilot" | "antigravity" | null;
 export type Role = "devops" | "backend" | "frontend";
-export type Provider = "claude" | "codex" | "gemini";
+export type Provider = "claude" | "codex" | "gemini" | "opencode" | "copilot" | "antigravity";
 export type TaskType = "new" | "modify" | "bugfix";
+
+export interface OAuthProviderConfig {
+  model: string;
+  via: "opencode" | "openclaw";
+}
+
+export type OAuthProviderConfigMap = Record<string, OAuthProviderConfig>;
 
 export interface ProviderSettings {
   roleProviders: {
@@ -19,6 +26,7 @@ export interface ProviderSettings {
     reviewTest: Provider | null;
   };
   autoAssign: boolean;
+  oauthProviderConfig?: OAuthProviderConfigMap;
 }
 
 export interface Card {
@@ -56,6 +64,23 @@ export interface CliToolStatus {
 
 export type CliStatusMap = Record<Provider, CliToolStatus>;
 
+export type OAuthConnectProvider = "github-copilot" | "antigravity";
+export type OAuthSource = "github" | "copilot_pat" | "google_antigravity" | null;
+
+export interface OAuthProviderStatus {
+  provider: OAuthConnectProvider;
+  connected: boolean;
+  source: OAuthSource;
+  email: string | null;
+  createdAt: number | null;
+  updatedAt: number | null;
+  expiresAt: number | null;
+  scope: string | null;
+  hasRefreshToken: boolean;
+}
+
+export type OAuthStatusMap = Record<OAuthConnectProvider, OAuthProviderStatus>;
+
 const base = ""; // same origin (vite proxy)
 
 export async function listCards(): Promise<Card[]> {
@@ -78,18 +103,21 @@ export async function createCard(input: {
   const r = await fetch(`${base}/api/cards`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ source: "manual", ...input })
+    body: JSON.stringify({ source: "manual", ...input }),
   });
   if (!r.ok) throw new Error(`createCard failed: ${r.status}`);
   const j = await r.json();
   return j.id as string;
 }
 
-export async function patchCard(id: string, patch: Partial<Pick<Card, "title" | "description" | "status" | "priority" | "assignee" | "role" | "task_type" | "project_path">>): Promise<void> {
+export async function patchCard(
+  id: string,
+  patch: Partial<Pick<Card, "title" | "description" | "status" | "priority" | "assignee" | "role" | "task_type" | "project_path">>
+): Promise<void> {
   const r = await fetch(`${base}/api/cards/${id}`, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(patch)
+    body: JSON.stringify(patch),
   });
   if (!r.ok) throw new Error(`patchCard failed: ${r.status}`);
 }
@@ -113,7 +141,11 @@ export async function getLogs(id: string): Promise<CardLog[]> {
   return j.logs as CardLog[];
 }
 
-export async function getTerminal(id: string, lines = 400, pretty = true): Promise<{ exists: boolean; path: string; text: string }> {
+export async function getTerminal(
+  id: string,
+  lines = 400,
+  pretty = true
+): Promise<{ exists: boolean; path: string; text: string }> {
   const r = await fetch(`${base}/api/cards/${id}/terminal?lines=${lines}&pretty=${pretty ? 1 : 0}`);
   if (!r.ok) throw new Error(`getTerminal failed: ${r.status}`);
   const j = await r.json();
@@ -156,7 +188,17 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
     reviewTest: null,
   },
   autoAssign: true,
+  oauthProviderConfig: {},
 };
+
+export type OAuthModelMap = Record<string, string[]>;
+
+export async function getOAuthModels(): Promise<OAuthModelMap> {
+  const r = await fetch(`${base}/api/oauth/models`);
+  if (!r.ok) throw new Error(`getOAuthModels failed: ${r.status}`);
+  const j = await r.json();
+  return (j.models ?? {}) as OAuthModelMap;
+}
 
 export async function getSettings(): Promise<ProviderSettings> {
   const r = await fetch(`${base}/api/settings`);
@@ -169,7 +211,7 @@ export async function saveSettings(settings: ProviderSettings): Promise<void> {
   const r = await fetch(`${base}/api/settings`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(settings)
+    body: JSON.stringify(settings),
   });
   if (!r.ok) throw new Error(`saveSettings failed: ${r.status}`);
 }
@@ -180,4 +222,112 @@ export async function getCliStatus(refresh?: boolean): Promise<CliStatusMap> {
   if (!r.ok) throw new Error(`getCliStatus failed: ${r.status}`);
   const j = await r.json();
   return j.providers as CliStatusMap;
+}
+
+export async function getOAuthStatus(): Promise<{ storageReady: boolean; providers: OAuthStatusMap }> {
+  const r = await fetch(`${base}/api/oauth/status`);
+  if (!r.ok) throw new Error(`getOAuthStatus failed: ${r.status}`);
+  const j = await r.json();
+  return {
+    storageReady: Boolean(j.storageReady),
+    providers: j.providers as OAuthStatusMap,
+  };
+}
+
+export async function disconnectOAuth(provider: OAuthConnectProvider): Promise<void> {
+  const r = await fetch(`${base}/api/oauth/disconnect`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ provider }),
+  });
+  if (!r.ok) throw new Error(`disconnectOAuth failed: ${r.status}`);
+}
+
+export function getOAuthStartUrl(provider: OAuthConnectProvider, redirectTo: string): string {
+  return `${base}/api/oauth/start?provider=${encodeURIComponent(provider)}&redirect_to=${encodeURIComponent(redirectTo)}`;
+}
+
+// --- GitHub Device Code Flow ---
+
+export interface DeviceCodeStart {
+  stateId: string;
+  userCode: string;
+  verificationUri: string;
+  expiresIn: number;
+  interval: number;
+}
+
+export type DevicePollStatus = "pending" | "slow_down" | "complete" | "expired" | "denied" | "error";
+
+export interface DevicePollResult {
+  status: DevicePollStatus;
+  email?: string | null;
+  error?: string;
+}
+
+export async function startGitHubDeviceFlow(): Promise<DeviceCodeStart> {
+  const r = await fetch(`${base}/api/oauth/github-copilot/device-start`, { method: "POST" });
+  if (!r.ok) {
+    const body = await r.json().catch(() => null);
+    throw new Error(body?.error ?? `device-start failed: ${r.status}`);
+  }
+  return (await r.json()) as DeviceCodeStart;
+}
+
+export async function pollGitHubDevice(stateId: string): Promise<DevicePollResult> {
+  const r = await fetch(`${base}/api/oauth/github-copilot/device-poll`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ stateId }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => null);
+    throw new Error(body?.error ?? `device-poll failed: ${r.status}`);
+  }
+  return (await r.json()) as DevicePollResult;
+}
+
+// --- OpenClaw Import ---
+
+export interface ImportableProfile {
+  profileKey: string;
+  openclawProvider: string;
+  kanbanProvider: "google_antigravity" | "github";
+  label: string;
+  email: string | null;
+  expiresAt: number | null;
+  hasRefreshToken: boolean;
+  expired: boolean;
+}
+
+export interface OpenClawProfilesResponse {
+  available: boolean;
+  authProfilesPath: string | null;
+  profiles: ImportableProfile[];
+}
+
+export interface ImportResult {
+  ok: boolean;
+  imported: string[];
+  skipped: string[];
+  errors: Array<{ provider: string; error: string }>;
+}
+
+export async function getOpenClawProfiles(): Promise<OpenClawProfilesResponse> {
+  const r = await fetch(`${base}/api/oauth/openclaw/profiles`);
+  if (!r.ok) throw new Error(`getOpenClawProfiles failed: ${r.status}`);
+  return (await r.json()) as OpenClawProfilesResponse;
+}
+
+export async function importFromOpenClaw(
+  providers?: Array<"google_antigravity" | "github">,
+  overwrite?: boolean,
+): Promise<ImportResult> {
+  const r = await fetch(`${base}/api/oauth/openclaw/import`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ providers, overwrite }),
+  });
+  if (!r.ok) throw new Error(`importFromOpenClaw failed: ${r.status}`);
+  return (await r.json()) as ImportResult;
 }

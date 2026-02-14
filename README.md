@@ -141,6 +141,7 @@ Using multiple AI coding agents (Claude Code, Codex CLI, Gemini CLI) means juggl
 - **Multi-Agent Orchestration** — Spawn and manage Claude Code, Codex CLI, and Gemini CLI processes
 - **Role-Based Auto-Assignment** — Automatically route tasks by role (DevOps / Backend / Frontend) and task type (New / Modify / Bugfix)
 - **AI Provider Detection** — Settings panel shows install and auth status for each CLI tool; unauthenticated providers are disabled in dropdowns
+- **OAuth Connect (optional)** — For environments where CLI auth isn't possible; connect via browser and store credentials server-side (encrypted)
 - **Automatic Review** — After implementation completes, auto-trigger a review/test cycle via Claude
 - **Real-time Terminal Viewer** — Live agent output in the browser; no more waiting blindly for completion
 - **Chat-to-Card** — Send `# task description` via Telegram, Slack, or any webhook source to instantly create a kanban card
@@ -338,6 +339,20 @@ cp .env.example .env
 | `DB_PATH` | `./kanban.sqlite` | SQLite database file path |
 | `LOGS_DIR` | `./logs` | Agent terminal log directory |
 | `OPENCLAW_CONFIG` | *(empty)* | Path to `openclaw.json` for gateway wake integration |
+| `OAUTH_ENCRYPTION_SECRET` | *(empty)* | **Required for OAuth Connect**. Secret used to encrypt OAuth tokens at rest (AES-256-GCM). Can reuse `SESSION_SECRET`. |
+| `OAUTH_BASE_URL` | `http://HOST:PORT` | Public base URL used to build OAuth redirect URIs (set if HOST/PORT differ from browser access) |
+| `ANTIGRAVITY_GITHUB_CLIENT_ID` | *(empty)* | GitHub OAuth App client id for `antigravity` provider |
+| `ANTIGRAVITY_GITHUB_CLIENT_SECRET` | *(empty)* | GitHub OAuth App client secret for `antigravity` provider |
+| `ANTIGRAVITY_GITHUB_SCOPE` | `read:user user:email` | GitHub OAuth scopes requested by `antigravity` provider |
+
+### OAuth Connect (optional)
+
+If a machine cannot authenticate CLI tools (e.g. locked-down environments), you can use **OAuth Connect** from the Settings modal.
+
+**Copilot decision (v1):** this repo uses **GitHub OAuth web login** (Authorization Code + PKCE) rather than asking for a GitHub PAT. This is the lowest-friction approach to avoid users creating long-lived PATs.
+
+- Scopes requested are controlled via `ANTIGRAVITY_GITHUB_SCOPE` (default: `read:user user:email`).
+- Tokens are stored **server-side** in SQLite and encrypted at rest using `OAUTH_ENCRYPTION_SECRET`.
 
 ### Provider Settings (UI)
 
@@ -454,6 +469,10 @@ Claw-Kanban/
 | `GET` | `/api/settings` | Get provider settings |
 | `PUT` | `/api/settings` | Save provider settings |
 | `GET` | `/api/cli-status` | Detect CLI install/auth status (30s cache, `?refresh=1` to bypass) |
+| `GET` | `/api/oauth/antigravity/start` | Start OAuth (redirects to GitHub) |
+| `GET` | `/api/oauth/antigravity/callback` | OAuth callback (stores token server-side) |
+| `GET` | `/api/oauth/status` | OAuth connection status |
+| `POST` | `/api/oauth/disconnect` | Disconnect OAuth (body: `{ provider?: string }`) |
 
 ### Webhook
 
@@ -493,6 +512,7 @@ Claw-Kanban is a **local development tool**. Important notes:
 - **Agent Permission Flags** — `--dangerously-skip-permissions` (Claude), `--yolo` (Codex/Gemini) are used for autonomous operation.
 - **Environment Inheritance** — Child processes inherit the server's environment.
 - **CORS** — Open CORS enabled for Vite dev proxy. Do not expose to the public internet.
+- **OAuth token storage** — OAuth tokens are stored **server-side only** in SQLite and encrypted at rest using `OAUTH_ENCRYPTION_SECRET` (AES-256-GCM). The browser never receives refresh tokens.
 
 ## Platform Support
 

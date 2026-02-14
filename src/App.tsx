@@ -1,7 +1,44 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
-import type { Card, CardStatus, ProviderSettings, Role, TaskType, Provider, CliStatusMap } from "./api";
-import { createCard, deleteCard, getLogs, getTerminal, listCards, patchCard, purgeByStatus, runCard, stopCard, reviewCard, getSettings, saveSettings, getCliStatus, DEFAULT_PROVIDER_SETTINGS } from "./api";
+import type {
+  Card,
+  CardStatus,
+  ProviderSettings,
+  Role,
+  TaskType,
+  Provider,
+  CliStatusMap,
+  OAuthStatusMap,
+  OAuthConnectProvider,
+  OpenClawProfilesResponse,
+  ImportResult,
+  DeviceCodeStart,
+  OAuthModelMap,
+} from "./api";
+import {
+  createCard,
+  deleteCard,
+  getLogs,
+  getTerminal,
+  listCards,
+  patchCard,
+  purgeByStatus,
+  runCard,
+  stopCard,
+  reviewCard,
+  getSettings,
+  saveSettings,
+  getCliStatus,
+  DEFAULT_PROVIDER_SETTINGS,
+  getOAuthStatus,
+  disconnectOAuth,
+  getOAuthStartUrl,
+  getOpenClawProfiles,
+  importFromOpenClaw,
+  startGitHubDeviceFlow,
+  pollGitHubDevice,
+  getOAuthModels,
+} from "./api";
 
 const STATUSES: CardStatus[] = ["Inbox", "Planned", "In Progress", "Review/Test", "Done", "Stopped"];
 const ROLES: { value: Role; label: string }[] = [
@@ -14,10 +51,20 @@ const TASK_TYPES: { value: TaskType; label: string }[] = [
   { value: "modify", label: "Modify" },
   { value: "bugfix", label: "Bugfix" },
 ];
-const PROVIDERS: { value: Provider; label: string; desc: string }[] = [
+const CLI_PROVIDERS: { value: Provider; label: string; desc: string }[] = [
   { value: "claude", label: "Claude Code", desc: "Claude CLI" },
   { value: "codex", label: "Codex CLI", desc: "OpenAI Codex" },
   { value: "gemini", label: "Gemini CLI", desc: "Google Gemini" },
+  { value: "opencode", label: "OpenCode", desc: "OpenCode CLI" },
+];
+const OAUTH_ASSIGNABLE: { value: Provider; label: string; desc: string; oauthKey: OAuthConnectProvider }[] = [
+  { value: "copilot", label: "GitHub Copilot", desc: "via OAuth", oauthKey: "github-copilot" },
+  { value: "antigravity", label: "Antigravity", desc: "via OAuth", oauthKey: "antigravity" },
+];
+const PROVIDERS = [...CLI_PROVIDERS, ...OAUTH_ASSIGNABLE];
+const OAUTH_PROVIDERS: { value: OAuthConnectProvider; label: string; desc: string }[] = [
+  { value: "antigravity", label: "Antigravity (Google)", desc: "Google OAuth for Antigravity token flow" },
+  { value: "github-copilot", label: "GitHub / Copilot", desc: "GitHub OAuth for Copilot-linked workflows" },
 ];
 
 function fmtTime(ms: number) {
@@ -59,6 +106,21 @@ export default function App() {
   const [cliStatus, setCliStatus] = useState<CliStatusMap | null>(null);
   const [cliLoading, setCliLoading] = useState(false);
 
+  const [oauthStatus, setOauthStatus] = useState<OAuthStatusMap | null>(null);
+  const [oauthStorageReady, setOauthStorageReady] = useState(true);
+  const [oauthLoading, setOauthLoading] = useState(false);
+  const [oauthBusy, setOauthBusy] = useState<OAuthConnectProvider | null>(null);
+
+  const [openclawProfiles, setOpenclawProfiles] = useState<OpenClawProfilesResponse | null>(null);
+  const [openclawImporting, setOpenclawImporting] = useState(false);
+  const [openclawImportResult, setOpenclawImportResult] = useState<ImportResult | null>(null);
+
+  const [deviceCode, setDeviceCode] = useState<DeviceCodeStart | null>(null);
+  const [devicePolling, setDevicePolling] = useState(false);
+  const [deviceStatus, setDeviceStatus] = useState<string | null>(null);
+
+  const [oauthModels, setOauthModels] = useState<OAuthModelMap>({});
+
   const [newRole, setNewRole] = useState<Role | "">("");
   const [newTaskType, setNewTaskType] = useState<TaskType | "">("");
   const [newProjectPath, setNewProjectPath] = useState("");
@@ -94,8 +156,136 @@ export default function App() {
     }
   }
 
-  // Provider is available if authenticated (or if CLI status not yet loaded, assume available)
-  const isProviderAvailable = (p: Provider) => cliStatus?.[p]?.authenticated ?? true;
+  async function loadOAuthStatus(refresh?: boolean) {
+    if (oauthLoading && !refresh) return;
+    setOauthLoading(true);
+    try {
+      const st = await getOAuthStatus();
+      setOauthStatus(st.providers);
+      setOauthStorageReady(st.storageReady);
+    } catch {
+      // ignore
+    } finally {
+      setOauthLoading(false);
+    }
+  }
+
+  async function loadOAuthModels() {
+    try {
+      const m = await getOAuthModels();
+      setOauthModels(m);
+    } catch {
+      // ignore
+    }
+  }
+
+  async function loadOpenClawProfiles() {
+    try {
+      const p = await getOpenClawProfiles();
+      setOpenclawProfiles(p);
+    } catch {
+      // ignore
+    }
+  }
+
+  async function handleOpenClawImport(overwrite?: boolean) {
+    setOpenclawImporting(true);
+    setOpenclawImportResult(null);
+    try {
+      const result = await importFromOpenClaw(undefined, overwrite);
+      setOpenclawImportResult(result);
+      await loadOAuthStatus(true);
+      await loadOpenClawProfiles();
+    } catch (e) {
+      const eObj = e as { message?: string };
+      setErr(eObj?.message ?? String(e));
+    } finally {
+      setOpenclawImporting(false);
+    }
+  }
+
+  async function startDeviceCodeFlow() {
+    setDeviceStatus(null);
+    try {
+      const dc = await startGitHubDeviceFlow();
+      setDeviceCode(dc);
+      setDevicePolling(true);
+
+      // Start polling
+      const intervalMs = Math.max(5000, (dc.interval ?? 5) * 1000);
+      const expiresAt = Date.now() + dc.expiresIn * 1000;
+
+      const poll = async () => {
+        while (Date.now() < expiresAt) {
+          try {
+            const result = await pollGitHubDevice(dc.stateId);
+            if (result.status === "complete") {
+              setDevicePolling(false);
+              setDeviceCode(null);
+              setDeviceStatus("connected");
+              await loadOAuthStatus(true);
+              return;
+            }
+            if (result.status === "expired" || result.status === "denied") {
+              setDevicePolling(false);
+              setDeviceCode(null);
+              setDeviceStatus(result.status === "denied" ? "Login cancelled" : "Code expired");
+              return;
+            }
+            if (result.status === "error") {
+              setDevicePolling(false);
+              setDeviceCode(null);
+              setDeviceStatus(`Error: ${result.error ?? "unknown"}`);
+              return;
+            }
+            // pending or slow_down — wait and retry
+            const delay = result.status === "slow_down" ? intervalMs + 2000 : intervalMs;
+            await new Promise((r) => setTimeout(r, delay));
+          } catch {
+            setDevicePolling(false);
+            setDeviceCode(null);
+            setDeviceStatus("Poll error");
+            return;
+          }
+        }
+        setDevicePolling(false);
+        setDeviceCode(null);
+        setDeviceStatus("Code expired");
+      };
+      void poll();
+    } catch (e) {
+      const eObj = e as { message?: string };
+      setErr(eObj?.message ?? String(e));
+    }
+  }
+
+  function startOAuthConnect(provider: OAuthConnectProvider) {
+    const redirectTo = `${window.location.origin}${window.location.pathname}?settings=1`;
+    window.location.assign(getOAuthStartUrl(provider, redirectTo));
+  }
+
+  async function disconnectOAuthProvider(provider: OAuthConnectProvider) {
+    setOauthBusy(provider);
+    try {
+      await disconnectOAuth(provider);
+      await loadOAuthStatus(true);
+      await loadCliStatus(true);
+    } catch (e) {
+      const eObj = e as { message?: string };
+      setErr(eObj?.message ?? String(e));
+    } finally {
+      setOauthBusy(null);
+    }
+  }
+
+  // Provider is available if authenticated (CLI) or connected (OAuth)
+  const isProviderAvailable = (p: Provider) => {
+    const oauthEntry = OAUTH_ASSIGNABLE.find((o) => o.value === p);
+    if (oauthEntry) {
+      return oauthStatus?.[oauthEntry.oauthKey]?.connected ?? false;
+    }
+    return cliStatus?.[p]?.authenticated ?? true;
+  };
 
   async function handleSaveSettings() {
     setSettingsLoading(true);
@@ -115,6 +305,29 @@ export default function App() {
     loadSettings().catch(() => {});
     const t = setInterval(() => refresh().catch(() => {}), 2500);
     return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const u = new URL(window.location.href);
+    const hasSettingsFlag = u.searchParams.get("settings") === "1";
+    const oauthFlag = u.searchParams.get("oauth");
+    const oauthError = u.searchParams.get("oauth_error");
+    if (!hasSettingsFlag && !oauthFlag && !oauthError) return;
+
+    if (oauthError) {
+      setErr(`OAuth connect failed (${oauthError})`);
+    }
+
+    loadOAuthStatus(true).catch(() => {});
+    loadCliStatus(true).catch(() => {});
+    setSettingsOpen(true);
+
+    u.searchParams.delete("settings");
+    u.searchParams.delete("oauth");
+    u.searchParams.delete("oauth_error");
+    const next = `${u.pathname}${u.search}${u.hash}`;
+    window.history.replaceState({}, document.title, next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -180,6 +393,9 @@ export default function App() {
             onClick={() => {
               loadSettings();
               loadCliStatus();
+              loadOAuthStatus(true);
+              loadOpenClawProfiles();
+              loadOAuthModels();
               setSettingsOpen(true);
             }}
           >Settings</button>
@@ -513,7 +729,7 @@ export default function App() {
               <div className="settingsSection">
                 <div className="settingsSectionTitle">AI Providers</div>
                 <div className="cliProviders">
-                  {PROVIDERS.map((p) => {
+                  {CLI_PROVIDERS.map((p) => {
                     const st = cliStatus?.[p.value];
                     const cls = !st || cliLoading
                       ? "cliCard loading"
@@ -550,6 +766,225 @@ export default function App() {
                   disabled={cliLoading}
                 >{cliLoading ? "Checking..." : "Re-check"}</button>
               </div>
+
+              <div className="settingsSection">
+                <div className="settingsSectionTitle">OAuth Connect (optional)</div>
+                <div className="settingsHint" style={{ marginBottom: 12 }}>
+                  Credentials are stored only on the server (encrypted in SQLite). No token is stored in browser storage.
+                </div>
+                {!oauthStorageReady && (
+                  <div className="oauthWarning">
+                    `OAUTH_ENCRYPTION_SECRET` is missing on the server. OAuth connect is disabled until it is configured.
+                  </div>
+                )}
+                <div className="oauthGrid">
+                  {OAUTH_PROVIDERS.map((oauthProvider) => {
+                    const st = oauthStatus?.[oauthProvider.value];
+                    const isConnected = st?.connected ?? false;
+                    const isBusy = oauthBusy === oauthProvider.value;
+                    return (
+                      <div
+                        key={oauthProvider.value}
+                        className={`oauthCard ${oauthLoading ? "loading" : isConnected ? "connected" : "disconnected"}`}
+                      >
+                        <div className="oauthCardHead">
+                          <div className="oauthCardName">{oauthProvider.label}</div>
+                          <div className={`oauthBadge ${oauthLoading ? "loading" : isConnected ? "connected" : "disconnected"}`}>
+                            {oauthLoading ? "Checking..." : isConnected ? "Connected" : "Not connected"}
+                          </div>
+                        </div>
+                        <div className="oauthCardDesc">{oauthProvider.desc}</div>
+                        <div className="oauthCardMeta">
+                          {isConnected ? (
+                            <>
+                              <span>{st?.email ?? "email unavailable"}</span>
+                              {st?.updatedAt ? <span>Updated: {fmtTime(st.updatedAt)}</span> : null}
+                              {st?.expiresAt ? <span>Expires: {fmtTime(st.expiresAt)}</span> : null}
+                              {st?.source ? <span>Source: {st.source}</span> : null}
+                            </>
+                          ) : (
+                            <span>OAuth not connected</span>
+                          )}
+                        </div>
+                        <div className="oauthCardActions">
+                          {oauthProvider.value === "github-copilot" ? (
+                            <button
+                              className="btn"
+                              onClick={() => startDeviceCodeFlow()}
+                              disabled={!oauthStorageReady || oauthLoading || oauthBusy !== null || devicePolling}
+                            >{devicePolling ? "Waiting..." : "Connect (Device Code)"}</button>
+                          ) : (
+                            <button
+                              className="btn"
+                              onClick={() => startOAuthConnect(oauthProvider.value)}
+                              disabled={!oauthStorageReady || oauthLoading || oauthBusy !== null}
+                            >Connect</button>
+                          )}
+                          <button
+                            className="btn secondary"
+                            onClick={() => disconnectOAuthProvider(oauthProvider.value)}
+                            disabled={oauthLoading || oauthBusy !== null || !isConnected}
+                          >{isBusy ? "Disconnecting..." : "Disconnect"}</button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {deviceCode && (
+                  <div style={{
+                    margin: "12px 0",
+                    padding: 16,
+                    background: "#1a1a2e",
+                    borderRadius: 8,
+                    border: "1px solid #444",
+                    textAlign: "center",
+                  }}>
+                    <div style={{ fontSize: "0.9em", marginBottom: 8 }}>
+                      Go to <a
+                        href={deviceCode.verificationUri}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ color: "#58a6ff" }}
+                      >{deviceCode.verificationUri}</a> and enter:
+                    </div>
+                    <div style={{
+                      fontSize: "1.8em",
+                      fontWeight: "bold",
+                      fontFamily: "monospace",
+                      letterSpacing: "0.15em",
+                      padding: "8px 0",
+                      userSelect: "all",
+                    }}>{deviceCode.userCode}</div>
+                    <div style={{ fontSize: "0.8em", color: "#999" }}>
+                      {devicePolling ? "Waiting for authorization..." : ""}
+                    </div>
+                  </div>
+                )}
+                {deviceStatus && !deviceCode && (
+                  <div style={{
+                    margin: "8px 0",
+                    fontSize: "0.85em",
+                    color: deviceStatus === "connected" ? "#4caf50" : "#f44336",
+                  }}>
+                    {deviceStatus === "connected" ? "GitHub connected successfully!" : deviceStatus}
+                  </div>
+                )}
+
+                <button
+                  className="btn secondary cliRecheck"
+                  onClick={() => loadOAuthStatus(true)}
+                  disabled={oauthLoading || oauthBusy !== null}
+                >{oauthLoading ? "Checking..." : "Re-check OAuth"}</button>
+
+                {openclawProfiles && openclawProfiles.profiles.length > 0 && (
+                  <div style={{ marginTop: 16 }}>
+                    <div className="settingsSectionTitle" style={{ fontSize: "0.9em", marginBottom: 8 }}>
+                      Import from OpenClaw
+                    </div>
+                    <div className="settingsHint" style={{ marginBottom: 8 }}>
+                      Found {openclawProfiles.profiles.length} profile(s) in OpenClaw auth-profiles. Import tokens to connect without separate OAuth app credentials.
+                    </div>
+                    <div className="oauthGrid">
+                      {openclawProfiles.profiles.map((p) => {
+                        const alreadyConnected = oauthStatus?.[
+                          p.kanbanProvider === "google_antigravity" ? "antigravity" : "github-copilot"
+                        ]?.connected ?? false;
+                        return (
+                          <div
+                            key={p.profileKey}
+                            className={`oauthCard ${alreadyConnected ? "connected" : p.expired ? "disconnected" : "disconnected"}`}
+                          >
+                            <div className="oauthCardHead">
+                              <div className="oauthCardName">{p.label}</div>
+                              <div className={`oauthBadge ${alreadyConnected ? "connected" : p.expired ? "warning" : "disconnected"}`}>
+                                {alreadyConnected ? "Already imported" : p.expired ? "Token expired" : "Available"}
+                              </div>
+                            </div>
+                            <div className="oauthCardMeta">
+                              {p.email && <span>{p.email}</span>}
+                              {p.expiresAt && <span>Expires: {fmtTime(p.expiresAt)}</span>}
+                              {p.hasRefreshToken && <span>Has refresh token</span>}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                      <button
+                        className="btn primary"
+                        onClick={() => handleOpenClawImport(false)}
+                        disabled={openclawImporting || !oauthStorageReady}
+                      >{openclawImporting ? "Importing..." : "Import All"}</button>
+                      <button
+                        className="btn secondary"
+                        onClick={() => handleOpenClawImport(true)}
+                        disabled={openclawImporting || !oauthStorageReady}
+                      >{openclawImporting ? "Importing..." : "Import (overwrite)"}</button>
+                    </div>
+                    {openclawImportResult && (
+                      <div style={{ marginTop: 8, fontSize: "0.85em", lineHeight: 1.5 }}>
+                        {openclawImportResult.imported.length > 0 && (
+                          <div style={{ color: "#4caf50" }}>Imported: {openclawImportResult.imported.join(", ")}</div>
+                        )}
+                        {openclawImportResult.skipped.length > 0 && (
+                          <div style={{ color: "#ff9800" }}>Skipped (already connected): {openclawImportResult.skipped.join(", ")}</div>
+                        )}
+                        {openclawImportResult.errors.length > 0 && (
+                          <div style={{ color: "#f44336" }}>
+                            Errors: {openclawImportResult.errors.map((e) => `${e.provider}: ${e.error}`).join(", ")}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {OAUTH_ASSIGNABLE.some((o) => oauthStatus?.[o.oauthKey]?.connected) && (
+                <div className="settingsSection">
+                  <div className="settingsSectionTitle">OAuth Provider Models</div>
+                  <div className="settingsHint" style={{ marginBottom: 12 }}>
+                    Configure which model and CLI to use when an OAuth provider is assigned to a task.
+                  </div>
+                  <div className="settingsGrid">
+                    {OAUTH_ASSIGNABLE.filter((o) => oauthStatus?.[o.oauthKey]?.connected).map((o) => {
+                      const cfg = settings.oauthProviderConfig?.[o.value] ?? { model: "", via: "opencode" as const };
+                      const models = oauthModels[o.value] ?? [];
+                      return (
+                        <div key={o.value} className="settingsField">
+                          <label>{o.label}</label>
+                          <select
+                            value={cfg.model}
+                            onChange={(e) => {
+                              const next = { ...settings.oauthProviderConfig, [o.value]: { ...cfg, model: e.target.value } };
+                              setSettings({ ...settings, oauthProviderConfig: next });
+                            }}
+                          >
+                            <option value="">Select model...</option>
+                            {models.map((m) => (
+                              <option key={m} value={m}>{m}</option>
+                            ))}
+                          </select>
+                          <select
+                            value={cfg.via}
+                            onChange={(e) => {
+                              const next = { ...settings.oauthProviderConfig, [o.value]: { ...cfg, via: e.target.value as "opencode" | "openclaw" } };
+                              setSettings({ ...settings, oauthProviderConfig: next });
+                            }}
+                            style={{ marginTop: 4 }}
+                          >
+                            <option value="opencode">via OpenCode</option>
+                            <option value="openclaw">via OpenClaw</option>
+                          </select>
+                          <span className="settingsHint">
+                            {cfg.model ? `Run: ${cfg.via} → ${cfg.model}` : "No model selected"}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               <div className="settingsSection">
                 <div className="settingsSectionTitle">Auto-assign</div>

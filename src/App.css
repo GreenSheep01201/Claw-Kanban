@@ -607,7 +607,7 @@ textarea:focus {
 /* CLI PROVIDERS (AI Providers section in settings) */
 .cliProviders {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 12px;
   margin-bottom: 12px;
 }
@@ -642,6 +642,75 @@ textarea:focus {
 .cliBadge.loading { background: rgba(59, 130, 246, 0.1); color: var(--text-muted); }
 .cliHint { font-size: 10px; color: var(--accent-warning); font-family: 'SF Mono', 'Fira Code', monospace; margin-top: 2px; }
 .cliRecheck { margin-top: 4px; align-self: flex-start; padding: 6px 14px; font-size: 12px; }
+
+/* OAUTH CONNECT */
+.oauthWarning {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.12);
+  color: #fbbf24;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+}
+.oauthGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.oauthCard {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-tertiary);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.oauthCard.connected { border-color: rgba(16, 185, 129, 0.35); }
+.oauthCard.disconnected { border-color: var(--border-subtle); }
+.oauthCard.loading { border-color: rgba(59, 130, 246, 0.35); }
+.oauthCardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.oauthCardName {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.oauthBadge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.oauthBadge.connected { background: rgba(16, 185, 129, 0.15); color: var(--accent-success); }
+.oauthBadge.disconnected { background: rgba(148, 163, 184, 0.12); color: var(--text-muted); }
+.oauthBadge.loading { background: rgba(59, 130, 246, 0.1); color: var(--text-secondary); }
+.oauthCardDesc {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.oauthCardMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  min-height: 44px;
+}
+.oauthCardActions {
+  display: flex;
+  gap: 8px;
+}
+.oauthCardActions .btn {
+  padding: 6px 12px;
+  font-size: 12px;
+}
 
 /* NEW CARD MODAL */
 .newCardModal { width: min(560px, 95vw); height: auto; max-height: 90vh; }
