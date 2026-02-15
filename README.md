@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.2-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.0.3-blue" alt="Version" />
   <img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen" alt="Node.js 22+" />
   <img src="https://img.shields.io/badge/license-Apache%202.0-orange" alt="License" />
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey" alt="Platform" />
@@ -594,6 +594,11 @@ systemctl --user status claw-kanban
 ```
 
 ## Changelog
+
+### v1.0.3
+
+- **`POST /api/wake` endpoint** — Agents can now send wake notifications via HTTP (`curl`) instead of requiring the external `openclaw` CLI
+- **AGENTS.md template updated** — All `openclaw gateway wake` references replaced with `curl` commands to the new `/api/wake` endpoint
 
 ### v1.0.2
 

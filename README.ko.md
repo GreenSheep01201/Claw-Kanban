@@ -546,6 +546,11 @@ systemctl --user status claw-kanban
 
 ## 변경 이력
 
+### v1.0.3
+
+- **`POST /api/wake` 엔드포인트 추가** — 외부 `openclaw` CLI 없이 HTTP(`curl`)로 웨이크 알림 전송 가능
+- **AGENTS.md 템플릿 업데이트** — `openclaw gateway wake` 명령을 새 `/api/wake` 엔드포인트의 `curl` 명령으로 교체
+
 ### v1.0.2
 
 - **GitHub Copilot 직접 API** — OAuth 토큰 교환 + OpenAI 호환 chat completions 스트리밍, opencode CLI 불필요
