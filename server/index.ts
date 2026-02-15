@@ -763,6 +763,22 @@ function queueWake(params: { key: string; text: string; debounceMs?: number }) {
   });
 }
 
+app.post("/api/wake", (req, res) => {
+  const schema = z.object({
+    text: z.string().min(1),
+  });
+  const parsed = schema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: "invalid_body", message: "text is required" });
+  }
+  queueWake({
+    key: `api:${Date.now()}`,
+    text: parsed.data.text,
+    debounceMs: 0,
+  });
+  res.json({ ok: true });
+});
+
 const CardStatus = z.enum(["Inbox", "Planned", "In Progress", "Review/Test", "Done", "Stopped"]);
 const Assignee = z.enum(["claude", "codex", "gemini", "opencode", "copilot", "antigravity"]).optional();
 const Role = z.enum(["devops", "backend", "frontend"]).optional();

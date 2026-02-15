@@ -66,7 +66,9 @@ When a card appears in Inbox:
 5. Assign to agent (background exec or sessions_spawn)
 6. **Always include a completion hook:**
    ```bash
-   openclaw gateway wake --text "Done [cardID]: <result summary>" --mode now
+   curl -s -X POST http://127.0.0.1:8787/api/wake \
+     -H 'content-type: application/json' \
+     -d '{"text":"Done [cardID]: <result summary>"}'
    ```
 
 ## 3. Completion Handling
@@ -98,7 +100,9 @@ When spawning any coding agent (even outside the kanban board), always include a
 
 ```bash
 # On task completion, notify via gateway wake
-openclaw gateway wake --text "Done: <brief result summary>" --mode now
+curl -s -X POST http://127.0.0.1:8787/api/wake \
+  -H 'content-type: application/json' \
+  -d '{"text":"Done: <brief result summary>"}'
 ```
 
 This ensures the orchestrator is always informed when work finishes, regardless of whether the task originated from the kanban board.
@@ -193,7 +197,9 @@ Even though the repo is under git, agents must NOT create commits by default.
 When an agent needs to commit changes, it must request approval via wake notification:
 
 ```bash
-openclaw gateway wake --text "Approval needed: git commit for [card title] - [changes summary]" --mode now
+curl -s -X POST http://127.0.0.1:8787/api/wake \
+  -H 'content-type: application/json' \
+  -d '{"text":"Approval needed: git commit for [card title] - [changes summary]"}'
 ```
 
 The orchestrator will then ask the user for explicit approval before allowing the commit.
